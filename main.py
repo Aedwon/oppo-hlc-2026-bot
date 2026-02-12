@@ -3,6 +3,7 @@ OPPO HLC Discord Bot — Main Entrypoint
 """
 import os
 import asyncio
+import traceback
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -47,7 +48,24 @@ async def on_ready():
         synced = await bot.tree.sync()
         print(f"   Synced {len(synced)} slash commands.")
     except Exception as e:
-        print(f"   ⚠️ Failed to sync commands: {e}")
+        print(f"   Failed to sync commands: {e}")
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: Exception):
+    """Global handler so slash command errors are never silently dropped."""
+    traceback.print_exception(type(error), error, error.__traceback__)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                f"An error occurred: {error}", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"An error occurred: {error}", ephemeral=True
+            )
+    except Exception:
+        pass
 
 
 async def setup_hook():
