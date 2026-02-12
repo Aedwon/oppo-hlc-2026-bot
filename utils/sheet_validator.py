@@ -11,10 +11,14 @@ Two modes:
      "Anyone with the link can view".
 
      Expected CSV columns (header row required, case-insensitive):
-       team_name, uid, server, role
+       uid, server, team_name, abbrev, ign, role
 
-     The "role" column determines which Discord role to assign.
-     Valid role values: player, staff, league ops, oppo
+     - uid / server: integer identifiers used for verification lookup
+     - team_name: full team name
+     - abbrev: team abbreviation used in nickname (e.g. TT)
+     - ign: in-game name used in nickname (e.g. Player1)
+     - role: determines which Discord role to assign
+       Valid values: player, staff, league ops, oppo
 """
 
 import asyncio
@@ -32,12 +36,13 @@ CACHE_TTL = 300  # seconds (5 minutes)
 
 # Hardcoded test entries (used when no sheet is configured)
 TEST_ENTRIES = [
-    {"team_name": "Test Team", "uid": "123456789", "server": "1001", "role": "player"},
-    {"team_name": "Test Team", "uid": "987654321", "server": "1002", "role": "player"},
-    {"team_name": "Test Team", "uid": "111111111", "server": "1003", "role": "player"},
-    {"team_name": "Staff Team", "uid": "100000001", "server": "1001", "role": "staff"},
-    {"team_name": "Staff Team", "uid": "100000002", "server": "1001", "role": "league ops"},
-    {"team_name": "OPPO", "uid": "200000001", "server": "1001", "role": "oppo"},
+    {"team_name": "Test Team", "abbrev": "TT", "ign": "TestPlayer1", "uid": "123456789", "server": "1001", "role": "player"},
+    {"team_name": "Test Team", "abbrev": "TT", "ign": "TestPlayer2", "uid": "987654321", "server": "1002", "role": "player"},
+    {"team_name": "Test Team", "abbrev": "TT", "ign": "TestPlayer3", "uid": "111111111", "server": "1003", "role": "player"},
+    {"team_name": "Alpha Squad", "abbrev": "AS", "ign": "AlphaLead", "uid": "222222222", "server": "1001", "role": "player"},
+    {"team_name": "Alpha Squad", "abbrev": "AS", "ign": "AlphaSub", "uid": "333333333", "server": "1001", "role": "player"},
+    {"team_name": "Staff Team", "abbrev": "STAFF", "ign": "StaffMember1", "uid": "100000001", "server": "1001", "role": "staff"},
+    {"team_name": "Staff Team", "abbrev": "STAFF", "ign": "StaffMember2", "uid": "100000002", "server": "1001", "role": "league ops"},
 ]
 
 
@@ -58,7 +63,7 @@ def _build_csv_url(sheet_id: str, gid: str = "0") -> str:
 
 class SheetValidator:
     """
-    Thread-safe, async-friendly validator that checks (team, uid, server)
+    Thread-safe, async-friendly validator that checks (uid, server)
     against a cached Google Sheet CSV or test data.
     """
 
@@ -98,20 +103,18 @@ class SheetValidator:
     def is_configured(self) -> bool:
         return self._sheet_id is not None
 
-    async def validate(self, team_name: str, uid: str, server: str) -> dict | None:
+    async def validate(self, uid: str, server: str) -> dict | None:
         """
-        Check if (team_name, uid, server) matches an entry.
-        Returns the matched entry dict (including 'role') or None if no match.
-        Comparison is case-insensitive and stripped.
+        Check if (uid, server) matches an entry.
+        Returns the matched entry dict (team_name, abbrev, ign, role, etc.)
+        or None if no match.
         """
         entries = await self._get_entries()
-        t = team_name.strip().lower()
         u = uid.strip()
         s = server.strip()
         for entry in entries:
             if (
-                entry.get("team_name", "").strip().lower() == t
-                and entry.get("uid", "").strip() == u
+                entry.get("uid", "").strip() == u
                 and entry.get("server", "").strip() == s
             ):
                 return entry

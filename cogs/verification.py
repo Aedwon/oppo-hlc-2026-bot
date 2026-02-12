@@ -1,19 +1,26 @@
 """
 Cog: Verification
-- /setup_verification       -- send panel with Verify button and guide image
-- /set_verification_role    -- (legacy) set a single fallback role
-- /set_verification_sheet   -- point to a public Google Sheet for validation
-- /set_verification_guide   -- set the guide image URL shown during verification
-- /toggle_verification_test -- enable/disable test mode
-- /refresh_verification_data -- force-refresh cached sheet data
+
+Admin commands:
+  /setup_verification       -- send panel with Verify button
+  /set_verification_sheet   -- point to a public Google Sheet for validation
+  /set_verification_guide   -- set the guide image URL shown during verification
+  /toggle_verification_test -- enable/disable test mode
+  /refresh_verification_data -- force-refresh cached sheet data
+  /set_oppo_passphrase      -- set secret passphrase for OPPO role
+  /mention_team             -- mention all verified members of a team
+  /reset_verifications      -- wipe all verification records and roles
 
 Flow:
   1. User clicks "Verify" on the panel
-  2. Ephemeral message shows a guide image (where to find UID/Server)
-     plus a team dropdown populated from the sheet data
-  3. User selects team -> modal opens asking for UID and Server (integers)
+  2. Ephemeral guide image is shown (if configured), then modal opens
+  3. User enters UID and Server (integers)
   4. Bot validates against the sheet (or test data)
-  5. On match: inserts into DB, assigns Discord role based on the sheet's "role" column
+  5. On match:
+     - Assigns Discord role based on sheet "role" column
+     - Sets nickname to "ABBREV | IGN" from sheet data
+     - Saves to DB
+     - Sends DM with confirmation and tournament instructions
 """
 import discord
 from discord.ext import commands
@@ -22,8 +29,8 @@ from db.database import Database
 from utils.sheet_validator import validator
 from utils.constants import VERIFICATION_ROLES
 
-# Default guide image (can be overridden with /set_verification_guide)
-DEFAULT_GUIDE_IMAGE = None  # Set via command
+# Channel where Marshals will mention teams on tournament day
+MATCH_CHANNEL_ID = 1471154639893168129
 
 
 # -- Persistent button on the panel ------------------------------------------
@@ -50,76 +57,49 @@ class VerifyButtonView(discord.ui.View):
             )
             return
 
-        # Get teams from the validator
-        teams = await validator.get_teams()
-        if not teams:
-            await interaction.response.send_message(
-                "No teams available. Ask an admin to configure the verification sheet.",
-                ephemeral=True,
-            )
-            return
-
-        # Build the guide embed
-        guide_embed = discord.Embed(
-            title="How to Verify",
-            description=(
-                "**Step 1:** Select your team from the dropdown below.\n"
-                "**Step 2:** You will be asked for your **In-Game UID** and **Server ID**.\n\n"
-                "Both UID and Server ID are **numbers**. "
-                "See the image below for where to find them in-game."
-            ),
-            color=0xF2C21A,
-        )
-
-        # Load guide image URL from DB config
+        # Show guide image if configured, then open modal
         guide_url = await Database.get_config(interaction.guild_id, "verification_guide_image")
+
         if guide_url:
+            guide_embed = discord.Embed(
+                title="How to Find Your UID and Server ID",
+                description=(
+                    "Both your **UID** and **Server ID** are numbers found in your game profile.\n"
+                    "Refer to the image below, then click **Continue** to proceed."
+                ),
+                color=0xF2C21A,
+            )
             guide_embed.set_image(url=guide_url)
 
-        mode_text = ""
-        if validator.is_test_mode:
-            mode_text = "\n\n*Test mode is active. Use the test entries to verify.*"
-            guide_embed.set_footer(text="TEST MODE")
+            if validator.is_test_mode:
+                guide_embed.set_footer(text="TEST MODE")
 
-        if mode_text:
-            guide_embed.description += mode_text
+            await interaction.response.send_message(
+                embed=guide_embed,
+                view=ContinueToModalView(),
+                ephemeral=True,
+            )
+        else:
+            # No guide image, go straight to modal
+            await interaction.response.send_modal(VerifyModal())
 
-        await interaction.response.send_message(
-            embed=guide_embed, view=TeamSelectView(teams), ephemeral=True
-        )
 
+# -- Continue button (shown after guide image) -------------------------------
 
-# -- Team select dropdown ----------------------------------------------------
-
-class TeamSelectView(discord.ui.View):
-    def __init__(self, teams: list[str]):
+class ContinueToModalView(discord.ui.View):
+    def __init__(self):
         super().__init__(timeout=120)
 
-        options = [
-            discord.SelectOption(label=t, value=t)
-            for t in teams[:25]
-        ]
-
-        self.select = discord.ui.Select(
-            placeholder="Select your team...",
-            options=options,
-            min_values=1,
-            max_values=1,
-        )
-        self.select.callback = self.on_select
-        self.add_item(self.select)
-
-    async def on_select(self, interaction: discord.Interaction):
-        team_name = self.select.values[0]
-        await interaction.response.send_modal(VerifyModal(team_name))
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary)
+    async def continue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VerifyModal())
 
 
 # -- Verification modal ------------------------------------------------------
 
 class VerifyModal(discord.ui.Modal):
-    def __init__(self, team_name: str):
+    def __init__(self):
         super().__init__(title="Verification")
-        self.team_name = team_name
 
         self.uid_input = discord.ui.TextInput(
             label="In-Game UID (numbers only)",
@@ -140,7 +120,7 @@ class VerifyModal(discord.ui.Modal):
         guild = interaction.guild
         user = interaction.user
 
-        # Validate that UID and Server are integers
+        # Validate numeric input
         uid_raw = self.uid_input.value.strip()
         server_raw = self.server_input.value.strip()
 
@@ -158,7 +138,7 @@ class VerifyModal(discord.ui.Modal):
             )
             return
 
-        # Double-check not already verified (race condition guard)
+        # Race condition guard
         existing = await Database.fetchone(
             "SELECT id FROM verified_users WHERE guild_id = %s AND discord_id = %s",
             (guild.id, user.id),
@@ -168,56 +148,133 @@ class VerifyModal(discord.ui.Modal):
             return
 
         # Validate against sheet / test data
-        matched = await validator.validate(self.team_name, uid_raw, server_raw)
+        matched = await validator.validate(uid_raw, server_raw)
         if not matched:
             mode_hint = " (test mode)" if validator.is_test_mode else ""
             await interaction.followup.send(
                 f"Verification failed{mode_hint}.\n"
-                "The team, UID, and server combination was not found in our records.\n"
+                "Your UID and Server ID combination was not found in our records.\n"
                 "Please double-check your details and try again.",
                 ephemeral=True,
             )
             return
 
+        # Extract data from matched entry
+        team_name = matched.get("team_name", "Unknown").strip()
+        abbrev = matched.get("abbrev", "").strip()
+        ign = matched.get("ign", "").strip()
+        role_key = matched.get("role", "").strip().lower()
+
         # Insert into DB
         await Database.execute(
             "INSERT INTO verified_users (guild_id, discord_id, team_name, game_uid, server) "
             "VALUES (%s, %s, %s, %s, %s)",
-            (guild.id, user.id, self.team_name, uid_raw, server_raw),
+            (guild.id, user.id, team_name, uid_raw, server_raw),
         )
 
-        # Determine which role to assign based on the sheet's "role" column
-        role_key = matched.get("role", "").strip().lower()
+        # Assign role based on sheet data
         role_id = VERIFICATION_ROLES.get(role_key)
-
-        role_assigned = None
+        assigned_role_name = role_key.title() if role_key else "Verified"
         if role_id:
             role = guild.get_role(role_id)
             if role:
                 try:
                     await user.add_roles(role, reason=f"Verification: {role_key}")
-                    role_assigned = role
                 except discord.Forbidden:
                     pass
 
-        # Fallback: also try the legacy per-guild verification role
+        # Also assign fallback role if configured
         fallback_role_id_str = await Database.get_config(guild.id, "verification_role_id")
         if fallback_role_id_str:
             fallback_role = guild.get_role(int(fallback_role_id_str))
-            if fallback_role and fallback_role != role_assigned:
+            if fallback_role:
                 try:
                     await user.add_roles(fallback_role, reason="Verification completed")
                 except discord.Forbidden:
                     pass
 
-        role_name = role_key.title() if role_key else "Verified"
+        # Set nickname to ABBREV | IGN
+        if abbrev and ign:
+            new_nick = f"{abbrev} | {ign}"
+            try:
+                await user.edit(nick=new_nick, reason="Verification nickname")
+            except discord.Forbidden:
+                pass  # Bot may not be able to change owner's nick
+
+        # Respond in channel
         await interaction.followup.send(
-            f"Successfully verified as **{role_name}**!\n"
-            f"**Team:** {self.team_name}\n"
-            f"**UID:** {uid_raw}\n"
-            f"**Server:** {server_raw}",
+            f"You have been successfully verified as **{assigned_role_name}**!\n"
+            f"**Team:** {team_name}\n"
+            f"Check your DMs for more details.",
             ephemeral=True,
         )
+
+        # Send DM with confirmation and instructions
+        try:
+            dm_embed = discord.Embed(
+                title="Verification Confirmed",
+                description=(
+                    f"You have been verified and assigned the **{assigned_role_name}** role "
+                    f"under **{team_name}**.\n\n"
+                    f"Please wait for a Marshal to mention you in your designated match thread "
+                    f"in <#{MATCH_CHANNEL_ID}> on tournament day.\n\n"
+                    f"Good luck and have fun!"
+                ),
+                color=0x00CC66,
+            )
+            dm_embed.add_field(name="Team", value=team_name, inline=True)
+            dm_embed.add_field(name="Role", value=assigned_role_name, inline=True)
+            if abbrev and ign:
+                dm_embed.add_field(name="Nickname", value=f"{abbrev} | {ign}", inline=True)
+            await user.send(embed=dm_embed)
+        except discord.Forbidden:
+            pass  # DMs disabled
+
+
+# -- Team select for /mention_team -------------------------------------------
+
+class MentionTeamSelect(discord.ui.View):
+    def __init__(self, teams: list[str]):
+        super().__init__(timeout=60)
+
+        options = [
+            discord.SelectOption(label=t, value=t)
+            for t in teams[:25]
+        ]
+
+        self.select = discord.ui.Select(
+            placeholder="Select a team to mention...",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        self.select.callback = self.on_select
+        self.add_item(self.select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        team_name = self.select.values[0]
+        await interaction.response.defer()
+
+        # Fetch all verified members of this team
+        rows = await Database.fetchall(
+            "SELECT discord_id FROM verified_users WHERE guild_id = %s AND team_name = %s",
+            (interaction.guild_id, team_name),
+        )
+
+        if not rows:
+            await interaction.followup.send(
+                f"No verified members found for **{team_name}**.", ephemeral=True
+            )
+            return
+
+        mentions = " ".join(f"<@{row['discord_id']}>" for row in rows)
+        await interaction.channel.send(
+            f"**{team_name}** -- {mentions}"
+        )
+        await interaction.followup.send(
+            f"Mentioned {len(rows)} member(s) of **{team_name}**.", ephemeral=True
+        )
+        self.stop()
 
 
 # -- Cog ---------------------------------------------------------------------
@@ -265,11 +322,9 @@ class Verification(commands.Cog):
             color=0xF2C21A,
         )
 
-        # Add guide image to the panel itself too
         guide_url = await Database.get_config(interaction.guild_id, "verification_guide_image")
         if guide_url:
             embed.set_image(url=guide_url)
-
 
         await channel.send(embed=embed, view=VerifyButtonView())
         await interaction.response.send_message(
@@ -344,7 +399,7 @@ class Verification(commands.Cog):
                 f"**Tab GID:** `{gid}`\n"
                 f"**Entries loaded:** {count}\n"
                 f"Test mode has been disabled.\n\n"
-                f"Expected columns: `team_name`, `uid`, `server`, `role`\n"
+                f"Expected columns: `uid`, `server`, `team_name`, `abbrev`, `ign`, `role`\n"
                 f"Valid role values: `player`, `staff`, `league ops`, `oppo`",
                 ephemeral=True,
             )
@@ -373,12 +428,13 @@ class Verification(commands.Cog):
                 "Verification test mode **enabled**.\n\n"
                 "**Test entries (use these to verify):**\n"
                 "```\n"
-                "Team: Test Team   | UID: 123456789 | Server: 1001 | Role: Player\n"
-                "Team: Test Team   | UID: 987654321 | Server: 1002 | Role: Player\n"
-                "Team: Test Team   | UID: 111111111 | Server: 1003 | Role: Player\n"
-                "Team: Staff Team  | UID: 100000001 | Server: 1001 | Role: Staff\n"
-                "Team: Staff Team  | UID: 100000002 | Server: 1001 | Role: League Ops\n"
-                "Team: OPPO        | UID: 200000001 | Server: 1001 | Role: OPPO\n"
+                "UID: 123456789 | Server: 1001 | Team: Test Team  | Nick: TT | TestPlayer1  | Role: Player\n"
+                "UID: 987654321 | Server: 1002 | Team: Test Team  | Nick: TT | TestPlayer2  | Role: Player\n"
+                "UID: 111111111 | Server: 1003 | Team: Test Team  | Nick: TT | TestPlayer3  | Role: Player\n"
+                "UID: 222222222 | Server: 1001 | Team: Alpha Squad| Nick: AS | AlphaLead    | Role: Player\n"
+                "UID: 333333333 | Server: 1001 | Team: Alpha Squad| Nick: AS | AlphaSub     | Role: Player\n"
+                "UID: 100000001 | Server: 1001 | Team: Staff Team | Nick: STAFF | StaffMember1| Role: Staff\n"
+                "UID: 100000002 | Server: 1001 | Team: Staff Team | Nick: STAFF | StaffMember2| Role: League Ops\n"
                 "```"
             )
             await interaction.response.send_message(test_info, ephemeral=True)
@@ -433,12 +489,104 @@ class Verification(commands.Cog):
     async def set_oppo_passphrase(
         self, interaction: discord.Interaction, passphrase: str
     ):
-        # Store without leading ! if the user includes it
         clean = passphrase.strip()
         await Database.set_config(interaction.guild_id, "oppo_passphrase", clean)
         await interaction.response.send_message(
             f"OPPO passphrase set. Users who type `{clean}` will receive the OPPO role "
             "and their message will be deleted instantly.",
+            ephemeral=True,
+        )
+
+    # -- League Ops: mention a team ------------------------------------------
+
+    @app_commands.command(
+        name="mention_team",
+        description="Mention all verified members of a team in the current channel.",
+    )
+    @app_commands.default_permissions(manage_messages=True)
+    async def mention_team(self, interaction: discord.Interaction):
+        # Get all distinct teams from verified_users
+        rows = await Database.fetchall(
+            "SELECT DISTINCT team_name FROM verified_users WHERE guild_id = %s ORDER BY team_name",
+            (interaction.guild_id,),
+        )
+        if not rows:
+            await interaction.response.send_message(
+                "No verified teams found.", ephemeral=True
+            )
+            return
+
+        teams = [row["team_name"] for row in rows if row["team_name"]]
+        if not teams:
+            await interaction.response.send_message(
+                "No verified teams found.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            "Select a team to mention:", view=MentionTeamSelect(teams), ephemeral=True
+        )
+
+    # -- Admin: reset all verifications --------------------------------------
+
+    @app_commands.command(
+        name="reset_verifications",
+        description="Remove all verification records and strip verification roles from members.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def reset_verifications(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+
+        # Get all verified users
+        rows = await Database.fetchall(
+            "SELECT discord_id FROM verified_users WHERE guild_id = %s",
+            (guild.id,),
+        )
+
+        # Collect all verification role objects
+        roles_to_remove = []
+        for role_id in VERIFICATION_ROLES.values():
+            role = guild.get_role(role_id)
+            if role:
+                roles_to_remove.append(role)
+
+        fallback_role_id_str = await Database.get_config(guild.id, "verification_role_id")
+        if fallback_role_id_str:
+            fallback_role = guild.get_role(int(fallback_role_id_str))
+            if fallback_role:
+                roles_to_remove.append(fallback_role)
+
+        # Strip roles and reset nicknames
+        removed_count = 0
+        for row in rows:
+            member = guild.get_member(row["discord_id"])
+            if member:
+                try:
+                    member_roles_to_remove = [r for r in roles_to_remove if r in member.roles]
+                    if member_roles_to_remove:
+                        await member.remove_roles(*member_roles_to_remove, reason="Verification reset")
+                    # Reset nickname
+                    if member.nick:
+                        try:
+                            await member.edit(nick=None, reason="Verification reset")
+                        except discord.Forbidden:
+                            pass
+                    removed_count += 1
+                except discord.Forbidden:
+                    pass
+
+        # Delete all records
+        await Database.execute(
+            "DELETE FROM verified_users WHERE guild_id = %s",
+            (guild.id,),
+        )
+
+        await interaction.followup.send(
+            f"All verifications have been reset.\n"
+            f"**Records deleted:** {len(rows)}\n"
+            f"**Roles/nicknames cleared:** {removed_count}",
             ephemeral=True,
         )
 
@@ -451,18 +599,16 @@ class Verification(commands.Cog):
 
         passphrase = await Database.get_config(message.guild.id, "oppo_passphrase")
         if not passphrase:
-            passphrase = "!OPPOteam"  # default
+            passphrase = "!OPPOteam"
 
         if message.content.strip() != passphrase:
             return
 
-        # Delete the message immediately
         try:
             await message.delete()
         except (discord.Forbidden, discord.NotFound):
             pass
 
-        # Check if already has the role
         oppo_role_id = VERIFICATION_ROLES.get("oppo")
         if not oppo_role_id:
             return
@@ -478,7 +624,6 @@ class Verification(commands.Cog):
                 pass
             return
 
-        # Assign role
         try:
             await message.author.add_roles(role, reason="OPPO passphrase verification")
         except discord.Forbidden:
@@ -488,15 +633,13 @@ class Verification(commands.Cog):
                 pass
             return
 
-        # Send confirmation via DM
         try:
             await message.author.send(
                 "You have been verified as **OPPO** team. Welcome!"
             )
         except discord.Forbidden:
-            pass  # DMs disabled, role was still assigned
+            pass
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Verification(bot))
-
