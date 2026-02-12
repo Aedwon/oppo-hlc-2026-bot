@@ -95,7 +95,7 @@ class Threads(commands.Cog):
 
         # Send plain text list in the channel
         if created_threads:
-            lines = [f"{idx}. {name} -- {mention}" for idx, (name, mention) in enumerate(created_threads, 1)]
+            lines = [f"- {name} -- {mention}" for name, mention in created_threads]
 
             chunks: list[str] = []
             current_chunk = ""
