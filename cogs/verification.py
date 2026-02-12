@@ -270,7 +270,7 @@ class Verification(commands.Cog):
         if guide_url:
             embed.set_image(url=guide_url)
 
-        embed.set_footer(text="System developed by Aedwon")
+
         await channel.send(embed=embed, view=VerifyButtonView())
         await interaction.response.send_message(
             f"Verification panel sent to {channel.mention}.", ephemeral=True

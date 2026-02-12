@@ -316,7 +316,7 @@ class TicketModal(discord.ui.Modal):
             color=0xF2C21A,
         )
         embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-        embed.set_footer(text="System developed by Aedwon")
+
 
         view = TicketActionsView(creator=user)
         mention_text = role_to_ping.mention if role_to_ping else ""
@@ -401,7 +401,7 @@ class TicketActionsView(discord.ui.View):
         try:
             await interaction.message.edit(view=self)
             embed = discord.Embed(description=f"✅ **Ticket claimed by {user.mention}**", color=0x00FF00)
-            embed.set_footer(text="System developed by Aedwon")
+    
             await interaction.channel.send(content=user.mention, embed=embed)
         except Exception as e:
             await interaction.followup.send(f"⚠️ Error updating UI: {e}", ephemeral=True)
@@ -616,7 +616,7 @@ class FeedbackModal(discord.ui.Modal):
             embed.add_field(name="Rating", value=f"{'⭐' * self.stars} ({self.stars}/5)", inline=False)
             if self.remarks.value:
                 embed.add_field(name="Remarks", value=self.remarks.value, inline=False)
-            embed.set_footer(text="System developed by Aedwon")
+    
             try:
                 await log_channel.send(embed=embed)
             except Exception:
@@ -765,7 +765,7 @@ async def finish_closure(interaction: discord.Interaction, reason: str, remarks:
             dm_embed.add_field(name="Reason", value=reason)
             if remarks:
                 dm_embed.add_field(name="Remarks", value=remarks)
-            dm_embed.set_footer(text="System developed by Aedwon")
+
 
             f_creator = discord.File(io.StringIO(html_content), filename=f"transcript-{interaction.channel.name}.html")
             await creator.send(embed=dm_embed, file=f_creator)
@@ -863,7 +863,7 @@ class Tickets(commands.Cog):
             description="**How can we help you?**\n\nPlease select the category that best matches your concern from the dropdown menu below.",
             color=0xF2C21A,
         )
-        embed.set_footer(text="System developed by Aedwon")
+
         await channel.send(embed=embed, view=TicketCreateView())
 
     async def ensure_ticket_panel(self):

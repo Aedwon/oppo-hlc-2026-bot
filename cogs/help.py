@@ -101,7 +101,7 @@ class Help(commands.Cog):
             if lines:
                 embed.add_field(name="🔧 Other", value="\n".join(lines), inline=False)
 
-        embed.set_footer(text="System developed by Aedwon")
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
