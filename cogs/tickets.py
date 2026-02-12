@@ -267,9 +267,17 @@ class TicketModal(discord.ui.Modal):
         category_channel = interaction.channel.category
 
         if not category_channel:
+            # Try configured category from DB
+            cat_id_str = await Database.get_config(guild.id, "ticket_category_id")
+            if cat_id_str:
+                category_channel = guild.get_channel(int(cat_id_str))
+        if not category_channel:
             category_channel = discord.utils.get(guild.categories, name="🎟⎮tickets")
         if not category_channel:
-            await interaction.followup.send("❌ Error: Could not determine category.", ephemeral=True)
+            await interaction.followup.send(
+                "No ticket category configured. Ask an admin to run `/set_ticket_category`.",
+                ephemeral=True,
+            )
             return
 
         tag = self.category_data["tag"]
@@ -984,6 +992,23 @@ class Tickets(commands.Cog):
     @check_ticket_reminders.before_loop
     async def before_reminders(self):
         await self.bot.wait_until_ready()
+
+    # ── Admin: set ticket category ─────────────────────────────
+
+    @app_commands.command(
+        name="set_ticket_category",
+        description="Set the channel category where new tickets are created.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(category="The category (folder) to create ticket channels under")
+    async def set_ticket_category(
+        self, interaction: discord.Interaction, category: discord.CategoryChannel
+    ):
+        await Database.set_config(interaction.guild_id, "ticket_category_id", str(category.id))
+        await interaction.response.send_message(
+            f"Ticket category set to **{category.name}**. New tickets will be created there.",
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot):
