@@ -736,10 +736,11 @@ async def finish_closure(interaction: discord.Interaction, reason: str, remarks:
     if remarks:
         embed.add_field(name="Remarks", value=remarks, inline=False)
 
-    creator = origin_view.creator
-    if not creator and creator_id:
+    # Always fetch creator from DB (survives restarts)
+    creator = None
+    if creator_id:
         try:
-            creator = await interaction.client.fetch_user(creator_id)
+            creator = interaction.guild.get_member(creator_id) or await interaction.client.fetch_user(creator_id)
         except Exception:
             creator = None
 
@@ -769,11 +770,15 @@ async def finish_closure(interaction: discord.Interaction, reason: str, remarks:
             f_creator = discord.File(io.StringIO(html_content), filename=f"transcript-{interaction.channel.name}.html")
             await creator.send(embed=dm_embed, file=f_creator)
 
+            # Read handler from DB (survives restarts)
             claimed_by_name = "Staff"
-            handler_id = None
-            if origin_view.claimed_by:
-                claimed_by_name = origin_view.claimed_by.mention
-                handler_id = origin_view.claimed_by.id
+            handler_id = ticket_data.get("claimed_by")
+            if handler_id:
+                handler_member = interaction.guild.get_member(handler_id)
+                if handler_member:
+                    claimed_by_name = handler_member.mention
+                else:
+                    claimed_by_name = f"<@{handler_id}>"
 
             is_test = bool(ticket_data.get("is_test"))
 
