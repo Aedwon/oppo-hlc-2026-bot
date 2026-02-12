@@ -422,6 +422,81 @@ class Verification(commands.Cog):
             f"Sheet data refreshed. **{count}** entries loaded.", ephemeral=True
         )
 
+    # -- Admin: set OPPO passphrase ------------------------------------------
+
+    @app_commands.command(
+        name="set_oppo_passphrase",
+        description="Set the secret passphrase for OPPO team verification.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(passphrase="The passphrase users type to get the OPPO role (e.g. !OPPOteam)")
+    async def set_oppo_passphrase(
+        self, interaction: discord.Interaction, passphrase: str
+    ):
+        # Store without leading ! if the user includes it
+        clean = passphrase.strip()
+        await Database.set_config(interaction.guild_id, "oppo_passphrase", clean)
+        await interaction.response.send_message(
+            f"OPPO passphrase set. Users who type `{clean}` will receive the OPPO role "
+            "and their message will be deleted instantly.",
+            ephemeral=True,
+        )
+
+    # -- Listener: OPPO passphrase -------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+
+        passphrase = await Database.get_config(message.guild.id, "oppo_passphrase")
+        if not passphrase:
+            passphrase = "!OPPOteam"  # default
+
+        if message.content.strip() != passphrase:
+            return
+
+        # Delete the message immediately
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
+        # Check if already has the role
+        oppo_role_id = VERIFICATION_ROLES.get("oppo")
+        if not oppo_role_id:
+            return
+
+        role = message.guild.get_role(oppo_role_id)
+        if not role:
+            return
+
+        if role in message.author.roles:
+            try:
+                await message.author.send("You already have the OPPO role!")
+            except discord.Forbidden:
+                pass
+            return
+
+        # Assign role
+        try:
+            await message.author.add_roles(role, reason="OPPO passphrase verification")
+        except discord.Forbidden:
+            try:
+                await message.author.send("Could not assign the OPPO role (missing permissions).")
+            except discord.Forbidden:
+                pass
+            return
+
+        # Send confirmation via DM
+        try:
+            await message.author.send(
+                "You have been verified as **OPPO** team. Welcome!"
+            )
+        except discord.Forbidden:
+            pass  # DMs disabled, role was still assigned
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Verification(bot))
+
