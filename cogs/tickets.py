@@ -830,12 +830,12 @@ async def finish_closure(interaction: discord.Interaction, reason: str, remarks:
             is_test = bool(ticket_data.get("is_test"))
 
             # Save pending rating to DB for persistence
-            await Database.execute(
+            # Save pending rating to DB for persistence
+            pending_id = await Database.insert_get_id(
                 "INSERT INTO pending_ratings (guild_id, ticket_name, handler_id, handler_mention, is_test) "
                 "VALUES (%s, %s, %s, %s, %s)",
                 (interaction.guild_id, interaction.channel.name, handler_id, claimed_by_name, is_test),
             )
-            pending_id = await Database.fetchval("SELECT LAST_INSERT_ID()")
 
             rate_embed = discord.Embed(
                 title="How was our service?",
@@ -1184,6 +1184,46 @@ class Tickets(commands.Cog):
             )
 
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+    # ── Admin: delete bot message ──────────────────────────────
+
+    @app_commands.command(
+        name="delete_bot_message",
+        description="Delete the last message sent by the bot in this channel or to a specific user.",
+    )
+    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.describe(user="Optional: User to delete DM from. If empty, deletes from current channel.")
+    async def delete_bot_message(
+        self, interaction: discord.Interaction, user: discord.User | None = None
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        target_channel = interaction.channel
+        if user:
+            try:
+                target_channel = await user.create_dm()
+            except Exception as e:
+                await interaction.followup.send(f"❌ Could not open DM with {user.mention}: {e}", ephemeral=True)
+                return
+
+        try:
+            # Look for last message from bot
+            async for message in target_channel.history(limit=20):
+                if message.author == self.bot.user:
+                    await message.delete()
+                    if user:
+                        await interaction.followup.send(f"✅ Deleted last bot message to {user.mention}.", ephemeral=True)
+                    else:
+                        await interaction.followup.send("✅ Deleted last bot message in this channel.", ephemeral=True)
+                    return
+            
+            await interaction.followup.send("❌ No recent bot messages found to delete.", ephemeral=True)
+
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to delete messages there.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error deleting message: {e}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

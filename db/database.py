@@ -76,6 +76,15 @@ class Database:
                 return cur.rowcount
 
     @classmethod
+    async def insert_get_id(cls, query: str, args: tuple = ()) -> int:
+        """Execute an INSERT query and return the new auto-increment ID."""
+        async with cls._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, args)
+                return cur.lastrowid
+
+
+    @classmethod
     async def fetchone(cls, query: str, args: tuple = ()) -> dict | None:
         """Fetch a single row as a dict."""
         async with cls._pool.acquire() as conn:
