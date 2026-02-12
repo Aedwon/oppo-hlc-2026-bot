@@ -117,3 +117,18 @@ CREATE TABLE IF NOT EXISTS thread_role_links (
     INDEX idx_guild_role (guild_id, role_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ============================================================
+-- Feature 8: Pending Ratings (survives bot restarts)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS pending_ratings (
+    id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    guild_id        BIGINT UNSIGNED NOT NULL,
+    ticket_name     VARCHAR(100)    NOT NULL,
+    handler_id      BIGINT UNSIGNED DEFAULT NULL,
+    handler_mention VARCHAR(100)    DEFAULT NULL,
+    is_test         BOOLEAN         NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+

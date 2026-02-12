@@ -298,7 +298,7 @@ class TicketModal(discord.ui.Modal):
         }
         if role_to_ping:
             overwrites[role_to_ping] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        support_role = guild.get_role(SUPPORT_ROLE_ID)
+        support_role = await get_support_role(guild)
         if support_role and support_role != role_to_ping:
             overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
@@ -594,13 +594,29 @@ class MoveCategoryView(discord.ui.View):
         self.add_item(MoveCategorySelect())
 
 
-# ── Rating system ──────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────
+
+async def get_log_channel(bot, guild_id: int):
+    """Resolve ticket log channel: DB config first, then env fallback."""
+    cfg = await Database.get_config(guild_id, "ticket_log_channel_id")
+    cid = int(cfg) if cfg else TICKET_LOG_CHANNEL_ID
+    return bot.get_channel(cid) if cid else None
+
+
+async def get_support_role(guild: discord.Guild):
+    """Resolve support role: DB config first, then env fallback."""
+    cfg = await Database.get_config(guild.id, "support_role_id")
+    rid = int(cfg) if cfg else SUPPORT_ROLE_ID
+    return guild.get_role(rid) if rid else None
+
+
+# ── Rating system (persistent across restarts) ─────────────────
 
 class FeedbackModal(discord.ui.Modal):
-    def __init__(self, stars, view_ref):
+    def __init__(self, stars: int, pending_id: int):
         super().__init__(title=f"You rated {stars} Stars!")
         self.stars = stars
-        self.view_ref = view_ref
+        self.pending_id = pending_id
         self.remarks = discord.ui.TextInput(
             label="Any comments? (Optional)", style=discord.TextStyle.paragraph,
             placeholder="Let us know how we can improve...", required=False, max_length=1000,
@@ -608,67 +624,90 @@ class FeedbackModal(discord.ui.Modal):
         self.add_item(self.remarks)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Look up pending rating from DB
+        pending = await Database.fetchone(
+            "SELECT * FROM pending_ratings WHERE id = %s", (self.pending_id,)
+        )
+        if not pending:
+            await interaction.response.edit_message(
+                content="This rating has already been submitted or expired.",
+                view=None, embed=None,
+            )
+            return
+
         await interaction.response.edit_message(
             content=f"✅ Thank you for your feedback! You rated us **{self.stars}/5** ⭐",
             view=None, embed=None,
         )
-        if self.view_ref.is_test:
+
+        # Delete pending record
+        await Database.execute("DELETE FROM pending_ratings WHERE id = %s", (self.pending_id,))
+
+        is_test = bool(pending.get("is_test"))
+        if is_test:
             return
 
-        log_channel = self.view_ref.bot.get_channel(self.view_ref.log_channel_id)
+        # Log feedback
+        log_channel = await get_log_channel(interaction.client, pending["guild_id"])
         if log_channel:
             embed = discord.Embed(title="🌟 New Feedback Received", color=0xFFD700, timestamp=datetime.datetime.now(TZ_MANILA))
             embed.add_field(name="User", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Ticket", value=self.view_ref.ticket_name, inline=True)
-            embed.add_field(name="Handler", value=self.view_ref.handler_mention, inline=True)
+            embed.add_field(name="Ticket", value=pending["ticket_name"], inline=True)
+            embed.add_field(name="Handler", value=pending.get("handler_mention", "Staff"), inline=True)
             embed.add_field(name="Rating", value=f"{'⭐' * self.stars} ({self.stars}/5)", inline=False)
             if self.remarks.value:
                 embed.add_field(name="Remarks", value=self.remarks.value, inline=False)
-    
             try:
                 await log_channel.send(embed=embed)
             except Exception:
                 pass
 
+        # Save to ticket_ratings
         await Database.execute(
             "INSERT INTO ticket_ratings (guild_id, ticket_name, user_id, user_name, handler_id, stars, remarks) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (
-                self.view_ref.guild_id,
-                self.view_ref.ticket_name,
+                pending["guild_id"],
+                pending["ticket_name"],
                 interaction.user.id,
                 interaction.user.name,
-                self.view_ref.handler_id,
+                pending.get("handler_id"),
                 self.stars,
                 self.remarks.value,
             ),
         )
 
 
-class RatingView(discord.ui.View):
-    def __init__(self, bot, log_channel_id, ticket_name, handler_mention, handler_id=None, guild_id=None, is_test=False):
+class PersistentRatingView(discord.ui.View):
+    """A single persistent view registered once at startup.
+    Handles ALL rating buttons using custom_id pattern: `rate:{pending_id}:{stars}`.
+    """
+    def __init__(self):
         super().__init__(timeout=None)
-        self.bot = bot
-        self.log_channel_id = log_channel_id
-        self.ticket_name = ticket_name
-        self.handler_mention = handler_mention
-        self.handler_id = handler_id
-        self.guild_id = guild_id
-        self.is_test = is_test
 
-    async def prompt_feedback(self, interaction: discord.Interaction, stars: int):
-        await interaction.response.send_modal(FeedbackModal(stars, self))
+    @discord.ui.button(label="1", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="rate_btn_1")
+    async def rate_1(self, interaction, button): pass
+    @discord.ui.button(label="2", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="rate_btn_2")
+    async def rate_2(self, interaction, button): pass
+    @discord.ui.button(label="3", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="rate_btn_3")
+    async def rate_3(self, interaction, button): pass
+    @discord.ui.button(label="4", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="rate_btn_4")
+    async def rate_4(self, interaction, button): pass
+    @discord.ui.button(label="5", emoji="⭐", style=discord.ButtonStyle.success, custom_id="rate_btn_5")
+    async def rate_5(self, interaction, button): pass
 
-    @discord.ui.button(label="1", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="rate_1")
-    async def rate_1(self, interaction, button): await self.prompt_feedback(interaction, 1)
-    @discord.ui.button(label="2", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="rate_2")
-    async def rate_2(self, interaction, button): await self.prompt_feedback(interaction, 2)
-    @discord.ui.button(label="3", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="rate_3")
-    async def rate_3(self, interaction, button): await self.prompt_feedback(interaction, 3)
-    @discord.ui.button(label="4", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="rate_4")
-    async def rate_4(self, interaction, button): await self.prompt_feedback(interaction, 4)
-    @discord.ui.button(label="5", emoji="⭐", style=discord.ButtonStyle.success, custom_id="rate_5")
-    async def rate_5(self, interaction, button): await self.prompt_feedback(interaction, 5)
+
+def make_rating_view(pending_id: int) -> discord.ui.View:
+    """Create a rating view with custom_ids encoded with the pending_id."""
+    view = discord.ui.View(timeout=None)
+    for stars in range(1, 6):
+        style = discord.ButtonStyle.success if stars == 5 else discord.ButtonStyle.secondary
+        button = discord.ui.Button(
+            label=str(stars), emoji="⭐", style=style,
+            custom_id=f"rate:{pending_id}:{stars}",
+        )
+        view.add_item(button)
+    return view
 
 
 # ── Close reason logic ─────────────────────────────────────────
@@ -736,7 +775,6 @@ async def finish_closure(interaction: discord.Interaction, reason: str, remarks:
     file = discord.File(io.StringIO(html_content), filename=f"transcript-{interaction.channel.name}.html")
 
     # Log channel
-    log_channel = interaction.guild.get_channel(TICKET_LOG_CHANNEL_ID)
     embed = discord.Embed(title="Ticket Closed", color=0xFF0000, timestamp=datetime.datetime.now(TZ_MANILA))
     embed.add_field(name="Ticket", value=interaction.channel.name, inline=True)
     embed.add_field(name="Closed By", value=interaction.user.mention, inline=True)
@@ -755,6 +793,7 @@ async def finish_closure(interaction: discord.Interaction, reason: str, remarks:
     if creator:
         embed.add_field(name="Creator", value=creator.mention, inline=True)
 
+    log_channel = await get_log_channel(interaction.client, interaction.guild_id)
     if log_channel:
         try:
             await log_channel.send(embed=embed, file=file)
@@ -790,6 +829,14 @@ async def finish_closure(interaction: discord.Interaction, reason: str, remarks:
 
             is_test = bool(ticket_data.get("is_test"))
 
+            # Save pending rating to DB for persistence
+            await Database.execute(
+                "INSERT INTO pending_ratings (guild_id, ticket_name, handler_id, handler_mention, is_test) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (interaction.guild_id, interaction.channel.name, handler_id, claimed_by_name, is_test),
+            )
+            pending_id = await Database.fetchval("SELECT LAST_INSERT_ID()")
+
             rate_embed = discord.Embed(
                 title="How was our service?",
                 description=f"Please rate your experience with {claimed_by_name}.",
@@ -800,10 +847,7 @@ async def finish_closure(interaction: discord.Interaction, reason: str, remarks:
 
             await creator.send(
                 embed=rate_embed,
-                view=RatingView(
-                    interaction.client, TICKET_LOG_CHANNEL_ID, interaction.channel.name,
-                    claimed_by_name, handler_id=handler_id, guild_id=interaction.guild_id, is_test=is_test,
-                ),
+                view=make_rating_view(pending_id),
             )
         except discord.Forbidden:
             pass
@@ -848,11 +892,43 @@ class Tickets(commands.Cog):
     async def cog_load(self):
         self.bot.add_view(TicketCreateView())
         self.bot.add_view(TicketActionsView())
-        self.bot.loop.create_task(self.ensure_ticket_panel())
 
     @commands.Cog.listener()
     async def on_ready(self):
-        await self.ensure_ticket_panel()
+        """Re-register persistent rating views for any pending ratings."""
+        pass  # Views with dynamic custom_ids are handled via on_interaction listener
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        """Catch rating button presses with dynamic custom_ids: rate:{pending_id}:{stars}"""
+        if interaction.type != discord.InteractionType.component:
+            return
+        custom_id = interaction.data.get("custom_id", "")
+        if not custom_id.startswith("rate:"):
+            return
+
+        parts = custom_id.split(":")
+        if len(parts) != 3:
+            return
+
+        try:
+            pending_id = int(parts[1])
+            stars = int(parts[2])
+        except ValueError:
+            return
+
+        # Check if pending rating exists
+        pending = await Database.fetchone(
+            "SELECT * FROM pending_ratings WHERE id = %s", (pending_id,)
+        )
+        if not pending:
+            await interaction.response.edit_message(
+                content="This rating has already been submitted or expired.",
+                view=None, embed=None,
+            )
+            return
+
+        await interaction.response.send_modal(FeedbackModal(stars, pending_id))
 
     # ── Admin: setup panel ─────────────────────────────────────
 
@@ -873,11 +949,6 @@ class Tickets(commands.Cog):
         )
 
         await channel.send(embed=embed, view=TicketCreateView())
-
-    async def ensure_ticket_panel(self):
-        """Check for existing panel and update its view, or skip if no channel configured."""
-        await self.bot.wait_until_ready()
-        # We rely on /setup_tickets to send panels now; this just re-registers views.
 
     # ── Admin: test mode ───────────────────────────────────────
 
@@ -1009,6 +1080,110 @@ class Tickets(commands.Cog):
             f"Ticket category set to **{category.name}**. New tickets will be created there.",
             ephemeral=True,
         )
+
+    # ── Admin: set ticket log channel ─────────────────────────
+
+    @app_commands.command(
+        name="set_ticket_log",
+        description="Set the channel where ticket logs and feedback are sent.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(channel="The channel to log ticket closures and feedback")
+    async def set_ticket_log(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ):
+        await Database.set_config(interaction.guild_id, "ticket_log_channel_id", str(channel.id))
+        await interaction.response.send_message(
+            f"Ticket log channel set to {channel.mention}.",
+            ephemeral=True,
+        )
+
+    # ── Admin: set support role ────────────────────────────────
+
+    @app_commands.command(
+        name="set_support_role",
+        description="Set the support role that can see all tickets.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(role="The role that should have access to all tickets")
+    async def set_support_role(
+        self, interaction: discord.Interaction, role: discord.Role
+    ):
+        await Database.set_config(interaction.guild_id, "support_role_id", str(role.id))
+        await interaction.response.send_message(
+            f"Support role set to **{role.name}**. This role will have access to all new tickets.",
+            ephemeral=True,
+        )
+
+    # ── Admin: ticket stats ────────────────────────────────────
+
+    @app_commands.command(
+        name="ticket_stats",
+        description="View ticket rating statistics.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def ticket_stats(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        # Overall stats
+        overall = await Database.fetchone(
+            "SELECT COUNT(*) AS total, AVG(stars) AS avg_stars FROM ticket_ratings WHERE guild_id = %s",
+            (interaction.guild_id,),
+        )
+        total = overall["total"] if overall else 0
+        avg = overall["avg_stars"] if overall and overall["avg_stars"] else 0
+
+        if total == 0:
+            await interaction.followup.send("No ticket ratings recorded yet.", ephemeral=True)
+            return
+
+        # Per-star breakdown
+        breakdown = await Database.fetchall(
+            "SELECT stars, COUNT(*) AS count FROM ticket_ratings "
+            "WHERE guild_id = %s GROUP BY stars ORDER BY stars",
+            (interaction.guild_id,),
+        )
+        star_counts = {row["stars"]: row["count"] for row in breakdown}
+        breakdown_lines = [
+            f"{'⭐' * s} — {star_counts.get(s, 0)} rating(s)"
+            for s in range(5, 0, -1)
+        ]
+
+        # Top handlers
+        handlers = await Database.fetchall(
+            "SELECT handler_id, COUNT(*) AS count, AVG(stars) AS avg "
+            "FROM ticket_ratings WHERE guild_id = %s AND handler_id IS NOT NULL "
+            "GROUP BY handler_id ORDER BY avg DESC LIMIT 5",
+            (interaction.guild_id,),
+        )
+        handler_lines = []
+        for h in handlers:
+            handler_lines.append(
+                f"<@{h['handler_id']}> — {h['count']} tickets, {h['avg']:.1f}⭐ avg"
+            )
+
+        embed = discord.Embed(
+            title="Ticket Rating Statistics",
+            color=0xF2C21A,
+        )
+        embed.add_field(
+            name="Overview",
+            value=f"**{total}** total ratings\n**{avg:.1f}** ⭐ average",
+            inline=False,
+        )
+        embed.add_field(
+            name="Breakdown",
+            value="\n".join(breakdown_lines),
+            inline=False,
+        )
+        if handler_lines:
+            embed.add_field(
+                name="Top Handlers",
+                value="\n".join(handler_lines),
+                inline=False,
+            )
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
