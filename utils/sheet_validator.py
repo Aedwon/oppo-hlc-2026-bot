@@ -10,11 +10,11 @@ Two modes:
      The sheet must be either "Published to the web" or shared as
      "Anyone with the link can view".
 
-     Expected CSV columns (header row required):
-       team_name, uid, server
+     Expected CSV columns (header row required, case-insensitive):
+       team_name, uid, server, role
 
-     Column names are case-insensitive and leading/trailing whitespace is trimmed.
-     The validator caches the sheet in memory and refreshes every CACHE_TTL seconds.
+     The "role" column determines which Discord role to assign.
+     Valid role values: player, staff, league ops, oppo
 """
 
 import asyncio
@@ -32,9 +32,12 @@ CACHE_TTL = 300  # seconds (5 minutes)
 
 # Hardcoded test entries (used when no sheet is configured)
 TEST_ENTRIES = [
-    {"team_name": "Test Team", "uid": "123456789", "server": "SEA"},
-    {"team_name": "Test Team", "uid": "987654321", "server": "NA"},
-    {"team_name": "Test Team", "uid": "111111111", "server": "EU"},
+    {"team_name": "Test Team", "uid": "123456789", "server": "1001", "role": "player"},
+    {"team_name": "Test Team", "uid": "987654321", "server": "1002", "role": "player"},
+    {"team_name": "Test Team", "uid": "111111111", "server": "1003", "role": "player"},
+    {"team_name": "Staff Team", "uid": "100000001", "server": "1001", "role": "staff"},
+    {"team_name": "Staff Team", "uid": "100000002", "server": "1001", "role": "league ops"},
+    {"team_name": "OPPO", "uid": "200000001", "server": "1001", "role": "oppo"},
 ]
 
 
@@ -43,7 +46,6 @@ def _extract_sheet_id(url_or_id: str) -> str:
     match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url_or_id)
     if match:
         return match.group(1)
-    # Assume it's already a bare ID
     return url_or_id.strip()
 
 
@@ -66,7 +68,7 @@ class SheetValidator:
         self._cache_ts: float = 0
         self._sheet_id: str | None = None
         self._gid: str = "0"
-        self._test_mode: bool = True  # starts in test mode
+        self._test_mode: bool = True
 
     # ----- Public API -------------------------------------------------------
 
@@ -75,7 +77,7 @@ class SheetValidator:
         self._sheet_id = _extract_sheet_id(url_or_id)
         self._gid = gid
         self._test_mode = False
-        self._cache = None  # force refresh on next check
+        self._cache = None
         self._cache_ts = 0
         return self._sheet_id
 
@@ -96,23 +98,24 @@ class SheetValidator:
     def is_configured(self) -> bool:
         return self._sheet_id is not None
 
-    async def validate(self, team_name: str, uid: str, server: str) -> bool:
+    async def validate(self, team_name: str, uid: str, server: str) -> dict | None:
         """
-        Return True if the (team_name, uid, server) triple matches an entry
-        in the data source. Comparison is case-insensitive and stripped.
+        Check if (team_name, uid, server) matches an entry.
+        Returns the matched entry dict (including 'role') or None if no match.
+        Comparison is case-insensitive and stripped.
         """
         entries = await self._get_entries()
         t = team_name.strip().lower()
-        u = uid.strip().lower()
-        s = server.strip().lower()
+        u = uid.strip()
+        s = server.strip()
         for entry in entries:
             if (
                 entry.get("team_name", "").strip().lower() == t
-                and entry.get("uid", "").strip().lower() == u
-                and entry.get("server", "").strip().lower() == s
+                and entry.get("uid", "").strip() == u
+                and entry.get("server", "").strip() == s
             ):
-                return True
-        return False
+                return entry
+        return None
 
     async def get_teams(self) -> list[str]:
         """Return a sorted, deduplicated list of team names from the data."""
@@ -172,9 +175,8 @@ class SheetValidator:
     def _parse_csv(text: str) -> list[dict]:
         reader = csv.DictReader(io.StringIO(text))
         entries = []
-        # Normalize header names to lowercase
         for row in reader:
-            normalized = {k.strip().lower(): v for k, v in row.items() if k}
+            normalized = {k.strip().lower(): v.strip() for k, v in row.items() if k}
             entries.append(normalized)
         return entries
 

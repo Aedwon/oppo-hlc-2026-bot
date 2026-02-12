@@ -22,6 +22,16 @@ ROLE_GENERAL = int(os.getenv("ROLE_GENERAL", "0"))
 SUPPORT_ROLE_ID = int(os.getenv("SUPPORT_ROLE_ID", "0"))
 
 # -------------------------------------------------------------------
+# Verification role mapping  (sheet "role" column -> Discord role ID)
+# -------------------------------------------------------------------
+VERIFICATION_ROLES = {
+    "player": int(os.getenv("ROLE_PLAYER", "1471152526081654854")),
+    "staff": int(os.getenv("ROLE_STAFF", "1471152576366907534")),
+    "league ops": int(os.getenv("ROLE_LEAGUE_OPS_VERIFY", "1471151717486956586")),
+    "oppo": int(os.getenv("ROLE_OPPO", "1471153157135667230")),
+}
+
+# -------------------------------------------------------------------
 # Ticket categories
 # -------------------------------------------------------------------
 TICKET_CATEGORIES = {
