@@ -101,3 +101,19 @@ CREATE TABLE IF NOT EXISTS spawned_vcs (
     owner_id        BIGINT UNSIGNED NOT NULL,
     created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- Feature 7: Thread-Role Links (auto-add on role assignment)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS thread_role_links (
+    id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    guild_id        BIGINT UNSIGNED NOT NULL,
+    thread_id       BIGINT UNSIGNED NOT NULL,
+    role_id         BIGINT UNSIGNED NOT NULL,
+    channel_id      BIGINT UNSIGNED NOT NULL,
+    created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_thread_role (thread_id, role_id),
+    INDEX idx_guild_role (guild_id, role_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+

@@ -1,11 +1,13 @@
 """
 Cog: Threads
-- /create_threads — create private threads with a name prefix, count, and add members by role.
-  Sends a plain text list of all thread links in the invoking channel.
+- /create_threads  -- create private threads with a name prefix, count, and add members by role
+- /delete_threads  -- delete all threads in the current channel
+- Auto-adds members to linked threads when they receive a linked role
 """
 import discord
 from discord.ext import commands
 from discord import app_commands
+from db.database import Database
 import asyncio
 
 
@@ -44,7 +46,7 @@ class Threads(commands.Cog):
         if role:
             members_to_add = [m for m in role.members if not m.bot]
 
-        created_threads: list[tuple[str, str]] = []
+        created_threads: list[tuple[str, str, int]] = []  # (name, mention, thread_id)
 
         await interaction.followup.send(
             f"Creating {count} private threads...", ephemeral=True
@@ -65,7 +67,15 @@ class Threads(commands.Cog):
                     except Exception:
                         pass
 
-                created_threads.append((thread_name, thread.mention))
+                created_threads.append((thread_name, thread.mention, thread.id))
+
+                # Save thread-role link for auto-add
+                if role:
+                    await Database.execute(
+                        "INSERT IGNORE INTO thread_role_links (guild_id, thread_id, role_id, channel_id) "
+                        "VALUES (%s, %s, %s, %s)",
+                        (interaction.guild_id, thread.id, role.id, channel.id),
+                    )
 
                 if i < count:
                     await asyncio.sleep(1)
@@ -85,20 +95,30 @@ class Threads(commands.Cog):
                                 await thread.add_user(member)
                             except Exception:
                                 pass
-                        created_threads.append((thread_name, thread.mention))
+                        created_threads.append((thread_name, thread.mention, thread.id))
+                        if role:
+                            await Database.execute(
+                                "INSERT IGNORE INTO thread_role_links (guild_id, thread_id, role_id, channel_id) "
+                                "VALUES (%s, %s, %s, %s)",
+                                (interaction.guild_id, thread.id, role.id, channel.id),
+                            )
                     except Exception:
-                        created_threads.append((thread_name, "Failed"))
+                        created_threads.append((thread_name, "Failed", 0))
                 else:
-                    created_threads.append((thread_name, f"Error: {e}"))
+                    created_threads.append((thread_name, f"Error: {e}", 0))
             except Exception as e:
-                created_threads.append((thread_name, f"Error: {e}"))
+                created_threads.append((thread_name, f"Error: {e}", 0))
 
         # Send plain text list in the channel
         if created_threads:
-            lines = [f"- {name} -- {mention}" for name, mention in created_threads]
+            success = len([t for t in created_threads if "Error" not in t[1] and "Failed" not in t[1]])
+            role_text = f" with **{role.name}** members" if role else ""
+            header = f"**Created {success}/{count} threads{role_text}:**\n"
+
+            lines = [f"- {name} -- {mention}" for name, mention, _ in created_threads]
 
             chunks: list[str] = []
-            current_chunk = ""
+            current_chunk = header
             for line in lines:
                 if len(current_chunk) + len(line) + 1 > 1900:
                     chunks.append(current_chunk)
@@ -111,7 +131,6 @@ class Threads(commands.Cog):
             for chunk in chunks:
                 await channel.send(chunk)
 
-        success = len([t for t in created_threads if "Error" not in t[1] and "Failed" not in t[1]])
         role_text = f" with {role.mention} members" if role else ""
         await interaction.followup.send(
             f"Created {success}/{count} threads{role_text}.", ephemeral=True
@@ -135,11 +154,9 @@ class Threads(commands.Cog):
         # Fetch all active and archived threads
         threads_to_delete = []
 
-        # Active threads
         for thread in channel.threads:
             threads_to_delete.append(thread)
 
-        # Archived threads (public and private)
         async for thread in channel.archived_threads(limit=None):
             threads_to_delete.append(thread)
 
@@ -157,6 +174,10 @@ class Threads(commands.Cog):
         deleted = 0
         for thread in threads_to_delete:
             try:
+                # Clean up thread-role links
+                await Database.execute(
+                    "DELETE FROM thread_role_links WHERE thread_id = %s", (thread.id,)
+                )
                 await thread.delete()
                 deleted += 1
                 await asyncio.sleep(0.5)
@@ -167,7 +188,35 @@ class Threads(commands.Cog):
             f"Deleted {deleted}/{len(threads_to_delete)} threads.", ephemeral=True
         )
 
+    # -- Auto-add members when they receive a linked role --------------------
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        if before.roles == after.roles:
+            return
+
+        # Find newly added roles
+        added_roles = set(after.roles) - set(before.roles)
+        if not added_roles:
+            return
+
+        for role in added_roles:
+            # Check if this role is linked to any threads
+            rows = await Database.fetchall(
+                "SELECT thread_id FROM thread_role_links WHERE guild_id = %s AND role_id = %s",
+                (after.guild.id, role.id),
+            )
+            if not rows:
+                continue
+
+            for row in rows:
+                thread = after.guild.get_thread(row["thread_id"])
+                if thread:
+                    try:
+                        await thread.add_user(after)
+                    except Exception:
+                        pass
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Threads(bot))
-
