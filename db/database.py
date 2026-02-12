@@ -5,6 +5,7 @@ import aiomysql
 import os
 import json
 import asyncio
+import pathlib
 
 
 class Database:
@@ -29,6 +30,28 @@ class Database:
             maxsize=10,
             pool_recycle=300,  # Reconnect idle connections every 5 min
         )
+        await cls._run_schema()
+
+    @classmethod
+    async def _run_schema(cls) -> None:
+        """Auto-create tables from db/schema.sql if they don't exist."""
+        schema_path = pathlib.Path(__file__).parent / "schema.sql"
+        if not schema_path.exists():
+            print("   schema.sql not found, skipping auto-migration.")
+            return
+        sql = schema_path.read_text(encoding="utf-8")
+        # Split on semicolons, run each statement
+        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        async with cls._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                for stmt in statements:
+                    if not stmt:
+                        continue
+                    try:
+                        await cur.execute(stmt)
+                    except Exception as e:
+                        print(f"   Schema statement warning: {e}")
+        print("   Auto-migration complete (schema.sql applied).")
 
     @classmethod
     async def close(cls) -> None:
