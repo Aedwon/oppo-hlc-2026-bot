@@ -231,51 +231,6 @@ class VerifyModal(discord.ui.Modal):
             pass  # DMs disabled
 
 
-# -- Team select for /mention_team -------------------------------------------
-
-class MentionTeamSelect(discord.ui.View):
-    def __init__(self, teams: list[str]):
-        super().__init__(timeout=60)
-
-        options = [
-            discord.SelectOption(label=t, value=t)
-            for t in teams[:25]
-        ]
-
-        self.select = discord.ui.Select(
-            placeholder="Select a team to mention...",
-            options=options,
-            min_values=1,
-            max_values=1,
-        )
-        self.select.callback = self.on_select
-        self.add_item(self.select)
-
-    async def on_select(self, interaction: discord.Interaction):
-        team_name = self.select.values[0]
-        await interaction.response.defer()
-
-        # Fetch all verified members of this team
-        rows = await Database.fetchall(
-            "SELECT discord_id FROM verified_users WHERE guild_id = %s AND team_name = %s",
-            (interaction.guild_id, team_name),
-        )
-
-        if not rows:
-            await interaction.followup.send(
-                f"No verified members found for **{team_name}**.", ephemeral=True
-            )
-            return
-
-        mentions = " ".join(f"<@{row['discord_id']}>" for row in rows)
-        await interaction.channel.send(
-            f"**{team_name}** -- {mentions}"
-        )
-        await interaction.followup.send(
-            f"Mentioned {len(rows)} member(s) of **{team_name}**.", ephemeral=True
-        )
-        self.stop()
-
 
 # -- Cog ---------------------------------------------------------------------
 
@@ -499,23 +454,56 @@ class Verification(commands.Cog):
 
     # -- League Ops: mention a team ------------------------------------------
 
+    async def team_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete for teams that have at least one verified member."""
+        rows = await Database.fetchall(
+            "SELECT DISTINCT team_name FROM verified_users WHERE guild_id = %s ORDER BY team_name",
+            (interaction.guild_id,),
+        )
+        teams = [row["team_name"] for row in rows if row["team_name"]]
+        filtered = [t for t in teams if current.lower() in t.lower()]
+        return [
+            app_commands.Choice(name=t, value=t)
+            for t in filtered[:25]
+        ]
+
     @app_commands.command(
         name="mention_team",
         description="Mention all verified members of a team in the current channel.",
     )
     @app_commands.default_permissions(manage_messages=True)
-    async def mention_team(self, interaction: discord.Interaction):
-        # Get all distinct teams from verified_users
+    @app_commands.describe(team="Team to mention (only shows teams with verified members)")
+    @app_commands.autocomplete(team=team_autocomplete)
+    async def mention_team(self, interaction: discord.Interaction, team: str):
+        rows = await Database.fetchall(
+            "SELECT discord_id FROM verified_users WHERE guild_id = %s AND team_name = %s",
+            (interaction.guild_id, team),
+        )
+        if not rows:
+            await interaction.response.send_message(
+                f"No verified members found for **{team}**.", ephemeral=True
+            )
+            return
+
+        mentions = " ".join(f"<@{row['discord_id']}>" for row in rows)
+        await interaction.response.send_message(
+            f"**{team}** — {mentions}"
+        )
+
+    # -- League Ops: list verified teams -------------------------------------
+
+    @app_commands.command(
+        name="list_teams",
+        description="List all teams that have at least one verified member.",
+    )
+    @app_commands.default_permissions(manage_messages=True)
+    async def list_teams(self, interaction: discord.Interaction):
         rows = await Database.fetchall(
             "SELECT DISTINCT team_name FROM verified_users WHERE guild_id = %s ORDER BY team_name",
             (interaction.guild_id,),
         )
-        if not rows:
-            await interaction.response.send_message(
-                "No verified teams found.", ephemeral=True
-            )
-            return
-
         teams = [row["team_name"] for row in rows if row["team_name"]]
         if not teams:
             await interaction.response.send_message(
@@ -523,9 +511,47 @@ class Verification(commands.Cog):
             )
             return
 
-        await interaction.response.send_message(
-            "Select a team to mention:", view=MentionTeamSelect(teams), ephemeral=True
+        listing = "\n".join(f"• {t}" for t in teams)
+        embed = discord.Embed(
+            title="Verified Teams",
+            description=listing,
+            color=0xF2C21A,
         )
+        embed.set_footer(text=f"{len(teams)} team(s) with verified members")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # -- League Ops: team verification stats ---------------------------------
+
+    @app_commands.command(
+        name="team_stats",
+        description="Show verification stats for all teams.",
+    )
+    @app_commands.default_permissions(manage_messages=True)
+    async def team_stats(self, interaction: discord.Interaction):
+        rows = await Database.fetchall(
+            "SELECT team_name, COUNT(*) AS count FROM verified_users "
+            "WHERE guild_id = %s GROUP BY team_name ORDER BY team_name",
+            (interaction.guild_id,),
+        )
+        if not rows:
+            await interaction.response.send_message(
+                "No verified members found.", ephemeral=True
+            )
+            return
+
+        total = sum(row["count"] for row in rows)
+        listing = "\n".join(
+            f"• **{row['team_name']}** — {row['count']} verified"
+            for row in rows
+        )
+
+        embed = discord.Embed(
+            title="Verification Stats",
+            description=listing,
+            color=0xF2C21A,
+        )
+        embed.set_footer(text=f"{len(rows)} team(s) • {total} total verified")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # -- Admin: reset all verifications --------------------------------------
 
