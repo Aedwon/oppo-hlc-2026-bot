@@ -26,7 +26,7 @@ class CreateThreadsModal(discord.ui.Modal):
             max_length=3,
         )
         self.members_input = discord.ui.TextInput(
-            label="Members to Include (IDs or mentions, comma separated)",
+            label="Member IDs (comma separated)",
             style=discord.TextStyle.paragraph,
             placeholder="e.g. 123456789, 987654321 or @User1, @User2",
             required=False,
