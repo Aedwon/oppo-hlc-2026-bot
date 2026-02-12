@@ -8,19 +8,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Pull latest code on server
-        run: |
-          curl -s "${{ secrets.PANEL_URL }}/api/client/servers/${{ secrets.SERVER_ID }}/command" \
-            -H "Authorization: Bearer ${{ secrets.PANEL_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            -X POST \
-            -d '{"command": "git pull"}'
-
-      - name: Wait for pull to complete
-        run: sleep 5
-
-      - name: Restart server
+      - name: Restart server (auto-pulls from Git on boot)
         run: |
           curl -s "${{ secrets.PANEL_URL }}/api/client/servers/${{ secrets.SERVER_ID }}/power" \
             -H "Authorization: Bearer ${{ secrets.PANEL_API_KEY }}" \
