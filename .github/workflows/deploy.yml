@@ -10,9 +10,21 @@ jobs:
     steps:
       - name: Restart server (auto-pulls from Git on boot)
         run: |
-          curl -s "${{ secrets.PANEL_URL }}/api/client/servers/${{ secrets.SERVER_ID }}/power" \
+          RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+            "${{ secrets.PANEL_URL }}/api/client/servers/${{ secrets.SERVER_ID }}/power" \
             -H "Authorization: Bearer ${{ secrets.PANEL_API_KEY }}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
             -X POST \
-            -d '{"signal": "restart"}'
+            -d '{"signal": "restart"}')
+
+          HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
+
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" != "204" ]; then
+            echo "::error::Expected HTTP 204, got $HTTP_CODE"
+            exit 1
+          fi
