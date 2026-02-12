@@ -117,6 +117,57 @@ class Threads(commands.Cog):
             f"Created {success}/{count} threads{role_text}.", ephemeral=True
         )
 
+    @app_commands.command(
+        name="delete_threads",
+        description="Delete all threads in the current channel.",
+    )
+    @app_commands.default_permissions(manage_threads=True)
+    async def delete_threads(self, interaction: discord.Interaction):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "This command must be used in a text channel.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Fetch all active and archived threads
+        threads_to_delete = []
+
+        # Active threads
+        for thread in channel.threads:
+            threads_to_delete.append(thread)
+
+        # Archived threads (public and private)
+        async for thread in channel.archived_threads(limit=None):
+            threads_to_delete.append(thread)
+
+        try:
+            async for thread in channel.archived_threads(private=True, limit=None):
+                if thread not in threads_to_delete:
+                    threads_to_delete.append(thread)
+        except discord.Forbidden:
+            pass
+
+        if not threads_to_delete:
+            await interaction.followup.send("No threads found in this channel.", ephemeral=True)
+            return
+
+        deleted = 0
+        for thread in threads_to_delete:
+            try:
+                await thread.delete()
+                deleted += 1
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+        await interaction.followup.send(
+            f"Deleted {deleted}/{len(threads_to_delete)} threads.", ephemeral=True
+        )
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Threads(bot))
+
