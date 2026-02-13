@@ -31,6 +31,7 @@ class Database:
             pool_recycle=300,  # Reconnect idle connections every 5 min
         )
         await cls._run_schema()
+        await cls._run_migrations()
 
     @classmethod
     async def _run_schema(cls) -> None:
@@ -52,6 +53,31 @@ class Database:
                     except Exception as e:
                         print(f"   Schema statement warning: {e}")
         print("   Auto-migration complete (schema.sql applied).")
+
+    @classmethod
+    async def _run_migrations(cls) -> None:
+        """Run incremental migrations for columns added after initial schema."""
+        db_name = os.getenv("DB_NAME", "oppo_hlc_bot")
+        migrations = [
+            # (table, column, column_definition, after_column)
+            ("spawned_vcs", "team_name", "VARCHAR(100) DEFAULT NULL", "owner_id"),
+        ]
+        async with cls._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                for table, column, col_def, after_col in migrations:
+                    await cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+                        (db_name, table, column),
+                    )
+                    (count,) = await cur.fetchone()
+                    if count == 0:
+                        await cur.execute(
+                            f"ALTER TABLE `{table}` ADD COLUMN `{column}` {col_def} AFTER `{after_col}`"
+                        )
+                        print(f"   Migration: added {table}.{column}")
+                    else:
+                        print(f"   Migration: {table}.{column} already exists, skipping.")
 
     @classmethod
     async def close(cls) -> None:

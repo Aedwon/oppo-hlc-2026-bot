@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS spawned_vcs (
     channel_id      BIGINT UNSIGNED PRIMARY KEY,
     guild_id        BIGINT UNSIGNED NOT NULL,
     owner_id        BIGINT UNSIGNED NOT NULL,
+    team_name       VARCHAR(100)    DEFAULT NULL,
     created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -131,4 +132,17 @@ CREATE TABLE IF NOT EXISTS pending_ratings (
     created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ============================================================
+-- Feature 9: League Ops Manual Entries (verification fallback)
+-- ============================================================
 
+CREATE TABLE IF NOT EXISTS lops_entries (
+    id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    guild_id        BIGINT UNSIGNED NOT NULL,
+    uid             VARCHAR(50)     NOT NULL,
+    server          VARCHAR(50)     NOT NULL,
+    ign             VARCHAR(100)    NOT NULL,
+    added_by        BIGINT UNSIGNED NOT NULL,
+    created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_guild_uid_server (guild_id, uid, server)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

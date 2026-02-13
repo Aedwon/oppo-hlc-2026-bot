@@ -149,6 +149,23 @@ class VerifyModal(discord.ui.Modal):
 
         # Validate against sheet / test data
         matched = await validator.validate(uid_raw, server_raw)
+
+        # Fallback: check league ops manual entries
+        if not matched:
+            lops_row = await Database.fetchone(
+                "SELECT ign FROM lops_entries WHERE guild_id = %s AND uid = %s AND server = %s",
+                (guild.id, uid_raw, server_raw),
+            )
+            if lops_row:
+                matched = {
+                    "team_name": "League Operations",
+                    "abbrev": "LOps",
+                    "ign": lops_row["ign"],
+                    "role": "league ops",
+                    "uid": uid_raw,
+                    "server": server_raw,
+                }
+
         if not matched:
             mode_hint = " (test mode)" if validator.is_test_mode else ""
             await interaction.followup.send(
@@ -451,6 +468,113 @@ class Verification(commands.Cog):
             "and their message will be deleted instantly.",
             ephemeral=True,
         )
+
+    # -- Admin: manage League Ops entries ------------------------------------
+
+    @app_commands.command(
+        name="add_lops",
+        description="Add a League Ops member entry for verification.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(
+        uid="In-game UID (numbers only)",
+        server="Server ID (numbers only)",
+        ign="In-game name",
+    )
+    async def add_lops(
+        self, interaction: discord.Interaction,
+        uid: str, server: str, ign: str,
+    ):
+        uid = uid.strip()
+        server = server.strip()
+        ign = ign.strip()
+
+        if not uid.isdigit():
+            await interaction.response.send_message("❌ UID must be numbers only.", ephemeral=True)
+            return
+        if not server.isdigit():
+            await interaction.response.send_message("❌ Server must be numbers only.", ephemeral=True)
+            return
+        if not ign:
+            await interaction.response.send_message("❌ IGN cannot be empty.", ephemeral=True)
+            return
+
+        try:
+            await Database.execute(
+                "INSERT INTO lops_entries (guild_id, uid, server, ign, added_by) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (interaction.guild_id, uid, server, ign, interaction.user.id),
+            )
+        except Exception:
+            await interaction.response.send_message(
+                f"❌ An entry with UID `{uid}` and Server `{server}` already exists.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"✅ League Ops entry added:\n"
+            f"**IGN:** {ign}\n"
+            f"**UID:** {uid}\n"
+            f"**Server:** {server}\n\n"
+            f"When this person verifies, they'll get the **League Ops** role "
+            f"and their nickname will be set to **LOps | {ign}**.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="remove_lops",
+        description="Remove a League Ops member entry.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(uid="The UID of the entry to remove")
+    async def remove_lops(self, interaction: discord.Interaction, uid: str):
+        uid = uid.strip()
+        rows_deleted = await Database.execute(
+            "DELETE FROM lops_entries WHERE guild_id = %s AND uid = %s",
+            (interaction.guild_id, uid),
+        )
+        if rows_deleted:
+            await interaction.response.send_message(
+                f"✅ Removed League Ops entry with UID `{uid}`.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ No entry found with UID `{uid}`.", ephemeral=True
+            )
+
+    @app_commands.command(
+        name="list_lops",
+        description="List all League Ops verification entries.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def list_lops(self, interaction: discord.Interaction):
+        rows = await Database.fetchall(
+            "SELECT uid, server, ign, added_by FROM lops_entries "
+            "WHERE guild_id = %s ORDER BY ign",
+            (interaction.guild_id,),
+        )
+        if not rows:
+            await interaction.response.send_message(
+                "No League Ops entries found. Use `/add_lops` to add one.",
+                ephemeral=True,
+            )
+            return
+
+        lines = []
+        for r in rows:
+            lines.append(
+                f"• **{r['ign']}** — UID: `{r['uid']}` | Server: `{r['server']}` "
+                f"(added by <@{r['added_by']}>)"
+            )
+
+        embed = discord.Embed(
+            title="League Ops Entries",
+            description="\n".join(lines),
+            color=0xF2C21A,
+        )
+        embed.set_footer(text=f"{len(rows)} entry/entries")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # -- League Ops: mention a team ------------------------------------------
 
