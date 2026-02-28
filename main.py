@@ -35,6 +35,7 @@ COGS = [
     "cogs.voice",
     "cogs.teams",
     "cogs.matches",
+    "cogs.challonge",
     "cogs.help",
 ]
 

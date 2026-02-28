@@ -184,3 +184,20 @@ CREATE TABLE IF NOT EXISTS match_games (
     INDEX idx_session (session_id),
     CONSTRAINT fk_game_session FOREIGN KEY (session_id) REFERENCES match_sessions(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- Feature 11: Challonge Bracket Integration
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS challonge_brackets (
+    id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    guild_id            BIGINT UNSIGNED NOT NULL,
+    channel_id          BIGINT UNSIGNED NOT NULL,
+    tournament_slug     VARCHAR(200)    NOT NULL,
+    tournament_name     VARCHAR(200)    NOT NULL,
+    tournament_url      VARCHAR(500)    DEFAULT NULL,
+    state               VARCHAR(50)     DEFAULT 'unknown',
+    linked_by           BIGINT UNSIGNED NOT NULL,
+    created_at          TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_guild_channel (guild_id, channel_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

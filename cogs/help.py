@@ -16,6 +16,7 @@ COG_DISPLAY = {
     "Voice": ("🔊 Voice", "Auto-create voice channels"),
     "Teams": ("👥 Teams", "Team management and mentions"),
     "Matches": ("🏆 Matches", "Tournament match management"),
+    "Challonge": ("🔗 Challonge", "Bracket integration"),
     "Help": ("❓ Help", "View available commands"),
 }
 
