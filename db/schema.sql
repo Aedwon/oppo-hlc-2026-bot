@@ -146,3 +146,41 @@ CREATE TABLE IF NOT EXISTS lops_entries (
     created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_guild_uid_server (guild_id, uid, server)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- Feature 10: Match Management
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS match_sessions (
+    id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    guild_id            BIGINT UNSIGNED NOT NULL,
+    channel_id          BIGINT UNSIGNED NOT NULL,
+    marshal_id          BIGINT UNSIGNED NOT NULL,
+    best_of             TINYINT UNSIGNED NOT NULL DEFAULT 3,
+    status              ENUM('ongoing','checking_ack','ended') NOT NULL DEFAULT 'ongoing',
+    is_disputed         BOOLEAN         NOT NULL DEFAULT FALSE,
+    ack_start_time      DATETIME        DEFAULT NULL,
+    dispute_start_time  DATETIME        DEFAULT NULL,
+    total_dispute_seconds INT UNSIGNED  NOT NULL DEFAULT 0,
+    last_message_id     BIGINT UNSIGNED DEFAULT NULL,
+    started_at          TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    ended_at            DATETIME        DEFAULT NULL,
+    UNIQUE KEY uq_active_channel (channel_id, status),
+    INDEX idx_guild_status (guild_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS match_games (
+    id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id          INT UNSIGNED    NOT NULL,
+    game_number         TINYINT UNSIGNED NOT NULL,
+    result              VARCHAR(200)    NOT NULL,
+    ack_team1           VARCHAR(50)     DEFAULT NULL,
+    ack_team1_user      VARCHAR(100)    DEFAULT NULL,
+    ack_team1_at        DATETIME        DEFAULT NULL,
+    ack_team2           VARCHAR(50)     DEFAULT NULL,
+    ack_team2_user      VARCHAR(100)    DEFAULT NULL,
+    ack_team2_at        DATETIME        DEFAULT NULL,
+    created_at          TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_session (session_id),
+    CONSTRAINT fk_game_session FOREIGN KEY (session_id) REFERENCES match_sessions(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -20,6 +20,7 @@ ROLE_TECHNICAL = int(os.getenv("ROLE_TECHNICAL", "0"))
 ROLE_CREATIVES = int(os.getenv("ROLE_CREATIVES", "0"))
 ROLE_GENERAL = int(os.getenv("ROLE_GENERAL", "0"))
 SUPPORT_ROLE_ID = int(os.getenv("SUPPORT_ROLE_ID", "0"))
+ROLE_MARSHAL = int(os.getenv("ROLE_MARSHAL", "0"))
 
 # -------------------------------------------------------------------
 # Verification role mapping  (sheet "role" column -> Discord role ID)
