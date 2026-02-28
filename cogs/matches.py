@@ -748,6 +748,90 @@ class Matches(commands.Cog):
 
         await interaction.response.send_message("🗑️ **Match session cancelled.**")
 
+    # -- /match_skip_ack (testing) ---------------------------------------------
+
+    @app_commands.command(
+        name="match_skip_ack",
+        description="Skip acknowledgement — instantly mark both teams as acked (testing/admin).",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def match_skip_ack(self, interaction: discord.Interaction):
+        session = active_matches.get(interaction.channel_id)
+        if not session or session.status != "checking_ack":
+            await interaction.response.send_message(
+                "❌ No game is currently waiting for acknowledgement.", ephemeral=True
+            )
+            return
+
+        if not await _is_marshal_or_admin(interaction, session):
+            await interaction.response.send_message("❌ Only the Marshal or an Admin can do this.", ephemeral=True)
+            return
+
+        now = datetime.now(timezone.utc)
+        game = session.games[-1]
+        user_name = f"{interaction.user.display_name} (Skipped)"
+
+        # Fill in any missing ack slots
+        if "Team A" not in game["acks"] and len(game["acks"]) < 1:
+            game["acks"]["Team A"] = {"user": user_name, "timestamp": now}
+        if len(game["acks"]) < 2:
+            # Use a second placeholder if only one ack exists
+            existing = list(game["acks"].keys())
+            second_label = "Team B" if "Team B" not in existing else "Team B (auto)"
+            game["acks"][second_label] = {"user": user_name, "timestamp": now}
+
+        # Sync to DB
+        ack_list = list(game["acks"].items())
+        await Database.execute(
+            "UPDATE match_games SET ack_team1=%s, ack_team1_user=%s, ack_team1_at=%s, "
+            "ack_team2=%s, ack_team2_user=%s, ack_team2_at=%s WHERE id=%s",
+            (
+                ack_list[0][0], ack_list[0][1]["user"], ack_list[0][1]["timestamp"],
+                ack_list[1][0], ack_list[1][1]["user"], ack_list[1][1]["timestamp"],
+                game["db_id"],
+            ),
+        )
+
+        session.status = "ongoing"
+        session.is_disputed = False
+        session.dispute_start_time = None
+        await session._sync_session()
+
+        await interaction.response.send_message(
+            f"⏭️ **Game {game['game_number']} acknowledgement skipped** by {interaction.user.mention}.\n"
+            "Both teams marked as acknowledged. Ready for next game or match end."
+        )
+
+    # -- /match_force_end (testing) --------------------------------------------
+
+    @app_commands.command(
+        name="match_force_end",
+        description="Force-end the match regardless of game count or ack status (testing/admin).",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def match_force_end(self, interaction: discord.Interaction):
+        session = active_matches.get(interaction.channel_id)
+        if not session:
+            await interaction.response.send_message("❌ No active match.", ephemeral=True)
+            return
+
+        if not await _is_marshal_or_admin(interaction, session):
+            await interaction.response.send_message("❌ Only the Marshal or an Admin can do this.", ephemeral=True)
+            return
+
+        session.status = "ended"
+        await session._sync_session()
+        del active_matches[interaction.channel_id]
+
+        embed = session.get_summary_embed()
+        embed.color = 0xFF4444
+        embed.title = "🛑 Match Force-Ended"
+
+        await interaction.response.send_message(
+            f"⚠️ **Match session force-ended** by {interaction.user.mention}.",
+            embed=embed,
+        )
+
     # -- /match_status ---------------------------------------------------------
 
     @app_commands.command(name="match_status", description="View the current match session status.")
