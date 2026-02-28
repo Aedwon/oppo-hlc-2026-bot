@@ -15,6 +15,7 @@ COG_DISPLAY = {
     "Threads": ("🧵 Threads", "Auto-create private threads"),
     "Voice": ("🔊 Voice", "Auto-create voice channels"),
     "Teams": ("👥 Teams", "Team management and mentions"),
+    "Matches": ("🏆 Matches", "Tournament match management"),
     "Help": ("❓ Help", "View available commands"),
 }
 
@@ -84,11 +85,25 @@ class Help(commands.Cog):
                 lines.append(f"**/{cmd.name}**{params}\n> {cmd.description}")
 
             if lines:
-                embed.add_field(
-                    name=display_name,
-                    value="\n".join(lines),
-                    inline=False,
-                )
+                # Split into chunks that fit Discord's 1024-char field limit
+                chunks = []
+                current_chunk: list[str] = []
+                current_len = 0
+                for line in lines:
+                    line_len = len(line) + 1  # +1 for newline
+                    if current_len + line_len > 1024 and current_chunk:
+                        chunks.append("\n".join(current_chunk))
+                        current_chunk = [line]
+                        current_len = line_len
+                    else:
+                        current_chunk.append(line)
+                        current_len += line_len
+                if current_chunk:
+                    chunks.append("\n".join(current_chunk))
+
+                for i, chunk in enumerate(chunks):
+                    field_name = display_name if i == 0 else f"{display_name} (cont.)"
+                    embed.add_field(name=field_name, value=chunk, inline=False)
 
         # Handle "Other" cog
         other_cmds = cog_commands.get("Other", [])
