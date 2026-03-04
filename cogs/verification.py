@@ -261,11 +261,14 @@ class Verification(commands.Cog):
         # Load sheet config from DB if previously set (guild_id=0 for global)
         sheet_id = await Database.get_config(0, "verification_sheet_id")
         sheet_gid = await Database.get_config(0, "verification_sheet_gid") or "0"
+        sheet_tab = await Database.get_config(0, "verification_sheet_tab")
         test_mode = await Database.get_config(0, "verification_test_mode")
 
         if sheet_id:
-            validator.configure_sheet(sheet_id, sheet_gid)
+            validator.configure_sheet(sheet_id, sheet_gid, tab_name=sheet_tab)
             print(f"   Verification sheet loaded: {sheet_id}")
+            if sheet_tab:
+                print(f"   Sheet tab: {sheet_tab}")
 
         if test_mode == "1":
             validator.enable_test_mode()
@@ -350,29 +353,33 @@ class Verification(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
         url="Full Google Sheets URL or sheet ID",
-        gid="Sheet tab GID (default: 0, the first tab)",
+        tab_name="Sheet tab name (default: FINAL Teams Database)",
+        gid="Sheet tab GID (fallback if tab_name is not set)",
     )
     async def set_verification_sheet(
-        self, interaction: discord.Interaction, url: str, gid: str = "0"
+        self, interaction: discord.Interaction, url: str,
+        tab_name: str = "FINAL Teams Database", gid: str = "0",
     ):
         await interaction.response.defer(ephemeral=True)
 
-        sheet_id = validator.configure_sheet(url, gid)
+        sheet_id = validator.configure_sheet(url, gid, tab_name=tab_name)
 
         await Database.set_config(0, "verification_sheet_id", sheet_id)
         await Database.set_config(0, "verification_sheet_gid", gid)
+        await Database.set_config(0, "verification_sheet_tab", tab_name)
         await Database.set_config(0, "verification_test_mode", "0")
 
         try:
             count = await validator.refresh()
+            teams = await validator.get_teams()
             await interaction.followup.send(
                 f"Verification sheet configured.\n"
                 f"**Sheet ID:** `{sheet_id}`\n"
-                f"**Tab GID:** `{gid}`\n"
-                f"**Entries loaded:** {count}\n"
+                f"**Tab:** `{tab_name}`\n"
+                f"**Entries loaded:** {count} players across {len(teams)} teams\n"
                 f"Test mode has been disabled.\n\n"
-                f"Expected columns: `uid`, `server`, `team_name`, `abbrev`, `ign`, `role`\n"
-                f"Valid role values: `player`, `staff`, `league ops`, `oppo`",
+                f"Sheet columns: `Team Name`, `Abbrev`, `IGN`, `UID`, `Server`\n"
+                f"All entries are assigned the **Player** role.",
                 ephemeral=True,
             )
         except Exception as e:
@@ -576,9 +583,9 @@ class Verification(commands.Cog):
         embed.set_footer(text=f"{len(rows)} entry/entries")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # -- League Ops: mention a team ------------------------------------------
+    # -- Autocomplete helpers -------------------------------------------------
 
-    async def team_autocomplete(
+    async def verified_team_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         """Autocomplete for teams that have at least one verified member."""
@@ -593,13 +600,29 @@ class Verification(commands.Cog):
             for t in filtered[:25]
         ]
 
+    async def sheet_team_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete for ALL teams from the sheet (not just verified)."""
+        try:
+            teams = await validator.get_teams()
+        except Exception:
+            teams = []
+        filtered = [t for t in teams if current.lower() in t.lower()]
+        return [
+            app_commands.Choice(name=t, value=t)
+            for t in filtered[:25]
+        ]
+
+    # -- Marshal: mention a team ---------------------------------------------
+
     @app_commands.command(
         name="mention_team",
         description="Mention all verified members of a team in the current channel.",
     )
     @app_commands.default_permissions(manage_messages=True)
     @app_commands.describe(team="Team to mention (only shows teams with verified members)")
-    @app_commands.autocomplete(team=team_autocomplete)
+    @app_commands.autocomplete(team=verified_team_autocomplete)
     async def mention_team(self, interaction: discord.Interaction, team: str):
         rows = await Database.fetchall(
             "SELECT discord_id FROM verified_users WHERE guild_id = %s AND team_name = %s",
@@ -616,7 +639,7 @@ class Verification(commands.Cog):
             f"**{team}** — {mentions}"
         )
 
-    # -- League Ops: list verified teams -------------------------------------
+    # -- Marshal: list verified teams ----------------------------------------
 
     @app_commands.command(
         name="list_teams",
@@ -644,38 +667,272 @@ class Verification(commands.Cog):
         embed.set_footer(text=f"{len(teams)} team(s) with verified members")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # -- League Ops: team verification stats ---------------------------------
+    # -- Marshal: team verification stats (enhanced) -------------------------
 
     @app_commands.command(
         name="team_stats",
-        description="Show verification stats for all teams.",
+        description="Show verification stats for all teams (cross-referenced with sheet).",
     )
     @app_commands.default_permissions(manage_messages=True)
     async def team_stats(self, interaction: discord.Interaction):
-        rows = await Database.fetchall(
+        await interaction.response.defer(ephemeral=True)
+
+        # Get all sheet entries grouped by team
+        sheet_entries = await validator.get_all_entries()
+        sheet_teams: dict[str, int] = {}
+        for e in sheet_entries:
+            name = e.get("team_name", "").strip()
+            if name:
+                sheet_teams[name] = sheet_teams.get(name, 0) + 1
+
+        # Get verified counts from DB
+        db_rows = await Database.fetchall(
             "SELECT team_name, COUNT(*) AS count FROM verified_users "
             "WHERE guild_id = %s GROUP BY team_name ORDER BY team_name",
             (interaction.guild_id,),
         )
-        if not rows:
-            await interaction.response.send_message(
-                "No verified members found.", ephemeral=True
+        verified_counts = {row["team_name"]: row["count"] for row in db_rows}
+
+        if not sheet_teams and not verified_counts:
+            await interaction.followup.send(
+                "No teams found. Is the verification sheet configured?",
+                ephemeral=True,
             )
             return
 
-        total = sum(row["count"] for row in rows)
-        listing = "\n".join(
-            f"• **{row['team_name']}** — {row['count']} verified"
-            for row in rows
-        )
+        # Merge: all teams from sheet + any extras from DB
+        all_teams = set(sheet_teams.keys()) | set(verified_counts.keys())
+        lines = []
+        total_players = 0
+        total_verified = 0
+        fully_verified = 0
+
+        for team in sorted(all_teams):
+            roster_size = sheet_teams.get(team, 0)
+            v_count = verified_counts.get(team, 0)
+            total_players += roster_size
+            total_verified += v_count
+
+            if roster_size > 0:
+                if v_count >= roster_size:
+                    icon = "✅"
+                    fully_verified += 1
+                elif v_count > 0:
+                    icon = "⚠️"
+                else:
+                    icon = "❌"
+                lines.append(f"{icon} **{team}** — {v_count}/{roster_size} verified")
+            else:
+                # Team from DB but not in sheet (e.g. League Ops)
+                lines.append(f"🔹 **{team}** — {v_count} verified (not in sheet)")
+
+        description = "\n".join(lines)
+
+        # Paginate if too long for one embed
+        if len(description) > 4000:
+            description = description[:4000] + "\n...truncated"
 
         embed = discord.Embed(
-            title="Verification Stats",
-            description=listing,
+            title="Team Verification Stats",
+            description=description,
             color=0xF2C21A,
         )
-        embed.set_footer(text=f"{len(rows)} team(s) • {total} total verified")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        embed.set_footer(
+            text=(
+                f"{len(all_teams)} team(s) • {total_verified}/{total_players} players verified • "
+                f"{fully_verified} fully verified"
+            )
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # -- Marshal: per-team roster status -------------------------------------
+
+    @app_commands.command(
+        name="team_roster",
+        description="Show per-player verification status for a team.",
+    )
+    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.describe(team="Team to inspect (shows all teams from the sheet)")
+    @app_commands.autocomplete(team=sheet_team_autocomplete)
+    async def team_roster(self, interaction: discord.Interaction, team: str):
+        await interaction.response.defer(ephemeral=True)
+
+        # Get roster from sheet
+        roster = await validator.get_team_roster(team)
+        if not roster:
+            await interaction.followup.send(
+                f"No players found for **{team}** in the sheet.", ephemeral=True
+            )
+            return
+
+        # Get verified users for this team from DB
+        db_rows = await Database.fetchall(
+            "SELECT game_uid, discord_id FROM verified_users "
+            "WHERE guild_id = %s AND team_name = %s",
+            (interaction.guild_id, team),
+        )
+        verified_uids = {row["game_uid"]: row["discord_id"] for row in db_rows}
+
+        v_count = 0
+        lines = []
+        for entry in roster:
+            uid = entry.get("uid", "")
+            ign = entry.get("ign", "")
+            if uid in verified_uids:
+                discord_id = verified_uids[uid]
+                lines.append(f"✅ **{ign}** — <@{discord_id}>")
+                v_count += 1
+            else:
+                lines.append(f"❌ **{ign}** — not verified")
+
+        abbrev = roster[0].get("abbrev", "") if roster else ""
+        header = f"{team}"
+        if abbrev:
+            header += f" [{abbrev}]"
+
+        embed = discord.Embed(
+            title=header,
+            description="\n".join(lines),
+            color=0x00CC66 if v_count == len(roster) else (0xF2C21A if v_count > 0 else 0xFF4444),
+        )
+        embed.set_footer(text=f"{v_count}/{len(roster)} verified")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # -- Marshal: list all unverified players ---------------------------------
+
+    @app_commands.command(
+        name="unverified",
+        description="List all unverified players from the sheet, grouped by team.",
+    )
+    @app_commands.default_permissions(manage_messages=True)
+    async def unverified(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        sheet_entries = await validator.get_all_entries()
+        if not sheet_entries:
+            await interaction.followup.send(
+                "No sheet data available. Is the verification sheet configured?",
+                ephemeral=True,
+            )
+            return
+
+        # Get all verified UIDs for this guild
+        db_rows = await Database.fetchall(
+            "SELECT game_uid FROM verified_users WHERE guild_id = %s",
+            (interaction.guild_id,),
+        )
+        verified_uids = {row["game_uid"] for row in db_rows}
+
+        # Group unverified by team
+        unverified_by_team: dict[str, list[str]] = {}
+        for entry in sheet_entries:
+            uid = entry.get("uid", "")
+            if uid not in verified_uids:
+                team = entry.get("team_name", "Unknown").strip()
+                ign = entry.get("ign", "?").strip()
+                if team not in unverified_by_team:
+                    unverified_by_team[team] = []
+                unverified_by_team[team].append(ign)
+
+        if not unverified_by_team:
+            await interaction.followup.send(
+                "🎉 All players from the sheet have been verified!",
+                ephemeral=True,
+            )
+            return
+
+        lines = []
+        total_unverified = 0
+        for team in sorted(unverified_by_team.keys()):
+            players = unverified_by_team[team]
+            total_unverified += len(players)
+            player_list = ", ".join(players)
+            lines.append(f"**{team}** ({len(players)}): {player_list}")
+
+        description = "\n".join(lines)
+        if len(description) > 4000:
+            description = description[:4000] + "\n...truncated"
+
+        embed = discord.Embed(
+            title="Unverified Players",
+            description=description,
+            color=0xFF4444,
+        )
+        embed.set_footer(
+            text=f"{total_unverified} unverified player(s) across {len(unverified_by_team)} team(s)"
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # -- Marshal: overall verification progress ------------------------------
+
+    @app_commands.command(
+        name="verification_progress",
+        description="Show an overall verification progress dashboard.",
+    )
+    @app_commands.default_permissions(manage_messages=True)
+    async def verification_progress(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        sheet_entries = await validator.get_all_entries()
+
+        # Sheet stats
+        sheet_teams: dict[str, int] = {}
+        for e in sheet_entries:
+            name = e.get("team_name", "").strip()
+            if name:
+                sheet_teams[name] = sheet_teams.get(name, 0) + 1
+        total_teams = len(sheet_teams)
+        total_players = sum(sheet_teams.values())
+
+        # DB stats
+        db_rows = await Database.fetchall(
+            "SELECT team_name, COUNT(*) AS count FROM verified_users "
+            "WHERE guild_id = %s GROUP BY team_name",
+            (interaction.guild_id,),
+        )
+        verified_counts = {row["team_name"]: row["count"] for row in db_rows}
+        total_verified = sum(verified_counts.values())
+
+        # Fully verified teams
+        fully_verified = 0
+        partially_verified = 0
+        not_started = 0
+        for team, size in sheet_teams.items():
+            v = verified_counts.get(team, 0)
+            if v >= size:
+                fully_verified += 1
+            elif v > 0:
+                partially_verified += 1
+            else:
+                not_started += 1
+
+        pct = (total_verified / total_players * 100) if total_players > 0 else 0
+
+        # Progress bar
+        bar_len = 20
+        filled = round(bar_len * pct / 100)
+        bar = "█" * filled + "░" * (bar_len - filled)
+
+        embed = discord.Embed(
+            title="Verification Progress",
+            color=0x00CC66 if pct == 100 else (0xF2C21A if pct >= 50 else 0xFF4444),
+        )
+        embed.description = (
+            f"```\n{bar} {pct:.1f}%\n```\n"
+            f"**Players:** {total_verified}/{total_players} verified\n"
+            f"**Teams:** {total_teams} total\n"
+            f"\n"
+            f"✅ Fully verified: {fully_verified}\n"
+            f"⚠️ Partially verified: {partially_verified}\n"
+            f"❌ Not started: {not_started}"
+        )
+
+        if validator.is_test_mode:
+            embed.set_footer(text="TEST MODE")
+        elif validator.tab_name:
+            embed.set_footer(text=f"Sheet tab: {validator.tab_name}")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # -- Admin: reset all verifications --------------------------------------
 
