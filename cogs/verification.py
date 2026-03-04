@@ -934,66 +934,152 @@ class Verification(commands.Cog):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # -- Admin: reset all verifications --------------------------------------
+    # -- Admin: verification reset helpers ------------------------------------
 
-    @app_commands.command(
-        name="reset_verifications",
-        description="Remove all verification records and strip verification roles from members.",
-    )
-    @app_commands.default_permissions(administrator=True)
-    async def reset_verifications(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        guild = interaction.guild
-
-        # Get all verified users
-        rows = await Database.fetchall(
-            "SELECT discord_id FROM verified_users WHERE guild_id = %s",
-            (guild.id,),
-        )
-
-        # Collect all verification role objects
-        roles_to_remove = []
+    async def _get_verification_roles(self, guild: discord.Guild) -> list[discord.Role]:
+        """Collect all verification role objects for a guild."""
+        roles = []
         for role_id in VERIFICATION_ROLES.values():
             role = guild.get_role(role_id)
             if role:
-                roles_to_remove.append(role)
+                roles.append(role)
 
         fallback_role_id_str = await Database.get_config(guild.id, "verification_role_id")
         if fallback_role_id_str:
             fallback_role = guild.get_role(int(fallback_role_id_str))
             if fallback_role:
-                roles_to_remove.append(fallback_role)
+                roles.append(fallback_role)
+        return roles
 
-        # Strip roles and reset nicknames
-        removed_count = 0
+    async def _strip_member_verification(
+        self, member: discord.Member, roles_to_remove: list[discord.Role], reason: str
+    ) -> bool:
+        """Strip verification roles and reset nickname for a single member. Returns True on success."""
+        try:
+            member_roles = [r for r in roles_to_remove if r in member.roles]
+            if member_roles:
+                await member.remove_roles(*member_roles, reason=reason)
+            if member.nick:
+                try:
+                    await member.edit(nick=None, reason=reason)
+                except discord.Forbidden:
+                    pass
+            return True
+        except discord.Forbidden:
+            return False
+
+    # -- Admin: reset verifications (granular) -------------------------------
+
+    @app_commands.command(
+        name="reset_verifications",
+        description="Reset verifications: a specific user, a team, or everything.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(
+        user="Reset a specific user's verification",
+        team="Reset all verifications for a specific team",
+        confirm_all="Type 'yes' to reset ALL verifications (required when no user/team specified)",
+    )
+    @app_commands.autocomplete(team=verified_team_autocomplete)
+    async def reset_verifications(
+        self, interaction: discord.Interaction,
+        user: discord.Member | None = None,
+        team: str | None = None,
+        confirm_all: str | None = None,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        roles_to_remove = await self._get_verification_roles(guild)
+
+        # --- Reset a specific user ---
+        if user:
+            row = await Database.fetchone(
+                "SELECT id FROM verified_users WHERE guild_id = %s AND discord_id = %s",
+                (guild.id, user.id),
+            )
+            if not row:
+                await interaction.followup.send(
+                    f"{user.mention} has no verification record.", ephemeral=True
+                )
+                return
+
+            await self._strip_member_verification(user, roles_to_remove, "Verification reset (user)")
+            await Database.execute(
+                "DELETE FROM verified_users WHERE guild_id = %s AND discord_id = %s",
+                (guild.id, user.id),
+            )
+            await interaction.followup.send(
+                f"✅ Verification reset for {user.mention}.\n"
+                "Their roles and nickname have been cleared.",
+                ephemeral=True,
+            )
+            return
+
+        # --- Reset a specific team ---
+        if team:
+            rows = await Database.fetchall(
+                "SELECT discord_id FROM verified_users WHERE guild_id = %s AND team_name = %s",
+                (guild.id, team),
+            )
+            if not rows:
+                await interaction.followup.send(
+                    f"No verified members found for **{team}**.", ephemeral=True
+                )
+                return
+
+            cleared = 0
+            for row in rows:
+                member = guild.get_member(row["discord_id"])
+                if member:
+                    if await self._strip_member_verification(member, roles_to_remove, f"Verification reset ({team})"):
+                        cleared += 1
+
+            await Database.execute(
+                "DELETE FROM verified_users WHERE guild_id = %s AND team_name = %s",
+                (guild.id, team),
+            )
+            await interaction.followup.send(
+                f"✅ Verification reset for **{team}**.\n"
+                f"**Records deleted:** {len(rows)}\n"
+                f"**Roles/nicknames cleared:** {cleared}",
+                ephemeral=True,
+            )
+            return
+
+        # --- Reset ALL (requires confirmation) ---
+        if not confirm_all or confirm_all.strip().lower() != "yes":
+            await interaction.followup.send(
+                "⚠️ **This will reset ALL verifications for the entire server.**\n\n"
+                "To confirm, run the command again with `confirm_all: yes`.\n\n"
+                "💡 You can also reset selectively:\n"
+                "• `/reset_verifications user:@someone` — reset one user\n"
+                "• `/reset_verifications team:Team Name` — reset one team",
+                ephemeral=True,
+            )
+            return
+
+        rows = await Database.fetchall(
+            "SELECT discord_id FROM verified_users WHERE guild_id = %s",
+            (guild.id,),
+        )
+
+        cleared = 0
         for row in rows:
             member = guild.get_member(row["discord_id"])
             if member:
-                try:
-                    member_roles_to_remove = [r for r in roles_to_remove if r in member.roles]
-                    if member_roles_to_remove:
-                        await member.remove_roles(*member_roles_to_remove, reason="Verification reset")
-                    # Reset nickname
-                    if member.nick:
-                        try:
-                            await member.edit(nick=None, reason="Verification reset")
-                        except discord.Forbidden:
-                            pass
-                    removed_count += 1
-                except discord.Forbidden:
-                    pass
+                if await self._strip_member_verification(member, roles_to_remove, "Verification reset (all)"):
+                    cleared += 1
 
-        # Delete all records
         await Database.execute(
             "DELETE FROM verified_users WHERE guild_id = %s",
             (guild.id,),
         )
 
         await interaction.followup.send(
-            f"All verifications have been reset.\n"
+            f"✅ All verifications have been reset.\n"
             f"**Records deleted:** {len(rows)}\n"
-            f"**Roles/nicknames cleared:** {removed_count}",
+            f"**Roles/nicknames cleared:** {cleared}",
             ephemeral=True,
         )
 
