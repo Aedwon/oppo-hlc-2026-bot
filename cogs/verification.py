@@ -409,6 +409,23 @@ class StaffCodeModal(discord.ui.Modal):
         roster = await validator.get_team_roster(matched_team)
         abbrev = roster[0].get("abbrev", "") if roster else ""
 
+        # Enforce max 1 coach + 1 manager per team
+        existing_staff = await Database.fetchone(
+            "SELECT discord_id FROM verified_users "
+            "WHERE guild_id = %s AND team_name = %s AND staff_type = %s",
+            (guild.id, matched_team, self.staff_type),
+        )
+        if existing_staff:
+            role_display = self.staff_type.title()
+            await interaction.followup.send(
+                f"**{matched_team}** already has a **{role_display}** "
+                f"(<@{existing_staff['discord_id']}>).\n"
+                f"Each team can only have 1 Coach and 1 Manager.\n\n"
+                f"If this is an error, ask an admin to reset that person's verification first.",
+                ephemeral=True,
+            )
+            return
+
         # Insert into DB with staff_type
         await Database.execute(
             "INSERT INTO verified_users (guild_id, discord_id, team_name, game_uid, server, staff_type) "
