@@ -6,11 +6,12 @@ Admin commands:
 
 Marshal / Admin commands:
   /match_start         -- start a BO(X) match session in the channel
-  /game_result         -- log a game result, triggers ack flow
+  /game_result         -- log a game result, triggers ack flow + 5-min auto-ack
   /match_undo_game     -- remove the last logged game
   /match_force_ack     -- force-acknowledge for a team (5 min cooldown)
   /match_end           -- end the match (validates enough games)
   /match_cancel        -- force-cancel without saving
+  /grace_period        -- start a 15-min grace period countdown
 
 Anyone:
   /match_status        -- view current match state
@@ -18,18 +19,25 @@ Anyone:
 Flow:
   1. Marshal starts a match session with /match_start
   2. After each game, marshal logs the result with /game_result
-  3. Verified team members type "I acknowledge" to confirm
-  4. Anyone can file a dispute (pauses ack timer)
-  5. Marshal resolves disputes, force_acks after 5 min if needed
-  6. Match ends when enough games are played and marshal uses /match_end
+  3. 5-minute dispute window auto-starts; teams type "I acknowledge"
+  4. If both teams ack → window closes, result is final
+  5. If 5 min expires → auto-force-ack, result is final
+  6. Anyone can file a dispute (pauses ack timer)
+  7. Match ends when enough games are played and marshal uses /match_end
 """
+import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 from db.database import Database
 from utils.constants import ROLE_MARSHAL
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 
 # ────────────────────────────────────────────────────────────────
@@ -37,6 +45,12 @@ from utils.constants import ROLE_MARSHAL
 # ────────────────────────────────────────────────────────────────
 
 active_matches: Dict[int, "MatchSession"] = {}
+
+# In-memory: channel_id → asyncio.Task for dispute auto-ack countdowns
+_ack_countdown_tasks: Dict[int, asyncio.Task] = {}
+
+# In-memory: channel_id → (asyncio.Task, marshal_id) for grace period timers
+_grace_period_tasks: Dict[int, tuple[asyncio.Task, int]] = {}
 
 
 # ────────────────────────────────────────────────────────────────
@@ -359,6 +373,11 @@ class EndMatchView(discord.ui.View):
         if self.session.channel_id in active_matches:
             del active_matches[self.session.channel_id]
 
+        # Cancel any running auto-ack countdown
+        task = _ack_countdown_tasks.pop(self.session.channel_id, None)
+        if task:
+            task.cancel()
+
         await interaction.response.edit_message(
             content="✅ **Match session ended.**",
             embed=self.session.get_summary_embed(),
@@ -370,6 +389,35 @@ class EndMatchView(discord.ui.View):
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="Cancelled match end.", view=None)
         self.stop()
+
+
+class GracePeriodCancelView(discord.ui.View):
+    """Cancel button for a running grace period countdown."""
+
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+
+    @discord.ui.button(
+        label="Cancel Grace Period", style=discord.ButtonStyle.danger,
+        emoji="⏹️", custom_id="grace_period_cancel",
+    )
+    async def cancel_grace(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_marshal_or_admin(interaction):
+            await interaction.response.send_message(
+                "❌ Only a Marshal or Admin can cancel the grace period.", ephemeral=True
+            )
+            return
+
+        task_info = _grace_period_tasks.pop(self.channel_id, None)
+        if task_info:
+            task_info[0].cancel()
+
+        await interaction.response.edit_message(
+            content=f"⏹️ **Grace period cancelled** by {interaction.user.mention}.",
+            embed=None,
+            view=None,
+        )
 
 
 # ────────────────────────────────────────────────────────────────
@@ -605,6 +653,9 @@ class Matches(commands.Cog):
         session.last_message_id = msg.id
         await session._sync_session()
 
+        # Start 5-minute auto-ack countdown
+        self._start_dispute_countdown(interaction.channel_id, session)
+
     # -- /match_undo_game ------------------------------------------------------
 
     @app_commands.command(name="match_undo_game", description="Remove the last logged game result.")
@@ -619,6 +670,10 @@ class Matches(commands.Cog):
             return
 
         if await session.undo_game():
+            # Cancel the auto-ack countdown
+            task = _ack_countdown_tasks.pop(interaction.channel_id, None)
+            if task:
+                task.cancel()
             await interaction.response.send_message(
                 f"✅ Game entry removed. {len(session.games)} game(s) remain.",
             )
@@ -746,6 +801,11 @@ class Matches(commands.Cog):
         await session._sync_session()
         del active_matches[interaction.channel_id]
 
+        # Cancel any running auto-ack countdown
+        task = _ack_countdown_tasks.pop(interaction.channel_id, None)
+        if task:
+            task.cancel()
+
         await interaction.response.send_message("🗑️ **Match session cancelled.**")
 
     # -- /match_skip_ack (testing) ---------------------------------------------
@@ -802,6 +862,11 @@ class Matches(commands.Cog):
             "Both teams marked as acknowledged. Ready for next game or match end."
         )
 
+        # Cancel the auto-ack countdown
+        task = _ack_countdown_tasks.pop(interaction.channel_id, None)
+        if task:
+            task.cancel()
+
     # -- /match_force_end (testing) --------------------------------------------
 
     @app_commands.command(
@@ -822,6 +887,11 @@ class Matches(commands.Cog):
         session.status = "ended"
         await session._sync_session()
         del active_matches[interaction.channel_id]
+
+        # Cancel any running auto-ack countdown
+        task = _ack_countdown_tasks.pop(interaction.channel_id, None)
+        if task:
+            task.cancel()
 
         embed = session.get_summary_embed()
         embed.color = 0xFF4444
@@ -923,6 +993,231 @@ class Matches(commands.Cog):
                 f"{d1['user']} ({t1}) and {d2['user']} ({t2}) on {timestamp_str}.**\n"
                 "Disputes for this game are no longer valid beyond this point."
             )
+
+            # Cancel the auto-ack countdown since both teams acknowledged
+            task = _ack_countdown_tasks.pop(message.channel.id, None)
+            if task:
+                task.cancel()
+
+    # -- Dispute countdown background task ------------------------------------
+
+    def _start_dispute_countdown(self, channel_id: int, session: "MatchSession"):
+        """Start a 5-minute auto-ack countdown for the current game."""
+        # Cancel any existing countdown for this channel
+        old_task = _ack_countdown_tasks.pop(channel_id, None)
+        if old_task:
+            old_task.cancel()
+
+        async def _countdown():
+            # We need to account for dispute pauses, so we poll every 5 seconds
+            while True:
+                await asyncio.sleep(5)
+
+                # Session might have been ended or cancelled
+                if channel_id not in active_matches:
+                    return
+                s = active_matches[channel_id]
+
+                # If no longer checking_ack, the game was acked or undone
+                if s.status != "checking_ack":
+                    return
+
+                # Effective time excludes dispute pauses
+                elapsed = s.get_effective_elapsed_time()
+                if elapsed >= 300:  # 5 minutes
+                    break
+
+            # Time's up — auto-force-ack
+            s = active_matches.get(channel_id)
+            if not s or s.status != "checking_ack" or not s.games:
+                return
+
+            game = s.games[-1]
+            now = datetime.now(timezone.utc)
+            user_name = "System (Auto-ack)"
+
+            # Fill missing ack slots
+            if len(game["acks"]) < 2:
+                for placeholder in ["Team A", "Team B"]:
+                    if len(game["acks"]) >= 2:
+                        break
+                    if placeholder not in game["acks"]:
+                        game["acks"][placeholder] = {"user": user_name, "timestamp": now}
+
+            # Sync to DB
+            ack_list = list(game["acks"].items())
+            if len(ack_list) >= 2:
+                await Database.execute(
+                    "UPDATE match_games SET ack_team1=%s, ack_team1_user=%s, ack_team1_at=%s, "
+                    "ack_team2=%s, ack_team2_user=%s, ack_team2_at=%s WHERE id=%s",
+                    (
+                        ack_list[0][0], ack_list[0][1]["user"], ack_list[0][1]["timestamp"],
+                        ack_list[1][0], ack_list[1][1]["user"], ack_list[1][1]["timestamp"],
+                        game["db_id"],
+                    ),
+                )
+
+            s.status = "ongoing"
+            s.is_disputed = False
+            s.dispute_start_time = None
+            await s._sync_session()
+
+            # Send alert
+            channel = self.bot.get_channel(channel_id)
+            if channel:
+                marshal = channel.guild.get_member(s.marshal_id) if hasattr(channel, 'guild') else None
+                marshal_ping = marshal.mention if marshal else f"<@{s.marshal_id}>"
+                await channel.send(
+                    f"⏰ **5-minute dispute window has closed.**\n"
+                    f"Game {game['game_number']} result has been **auto-acknowledged**.\n"
+                    f"The result is now final. {marshal_ping}"
+                )
+
+            _ack_countdown_tasks.pop(channel_id, None)
+
+        task = asyncio.create_task(_countdown())
+        _ack_countdown_tasks[channel_id] = task
+
+    # -- Grace period command --------------------------------------------------
+
+    @app_commands.command(
+        name="grace_period",
+        description="Start a 15-minute grace period countdown from a specified start time.",
+    )
+    @app_commands.describe(
+        time="Round start time in HH:MM format (e.g. 15:30 or 3:30)",
+    )
+    async def grace_period(self, interaction: discord.Interaction, time: str):
+        if not await _is_marshal_or_admin(interaction):
+            await interaction.response.send_message(
+                "❌ You need the Marshal role or Admin to do this.", ephemeral=True
+            )
+            return
+
+        # Cancel existing grace period in this channel
+        existing = _grace_period_tasks.pop(interaction.channel_id, None)
+        if existing:
+            existing[0].cancel()
+
+        # Parse time (HH:MM format, 24h or 12h)
+        manila_tz = ZoneInfo("Asia/Manila")
+        now_manila = datetime.now(manila_tz)
+
+        try:
+            # Try 24-hour format first
+            parts = time.strip().replace(".", ":").split(":")
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 else 0
+
+            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+                raise ValueError("Invalid time")
+
+            start_time = now_manila.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+            # If the start time is more than 1 hour in the past, assume tomorrow
+            if start_time < now_manila - timedelta(hours=1):
+                start_time += timedelta(days=1)
+
+        except (ValueError, IndexError):
+            await interaction.response.send_message(
+                "❌ Invalid time format. Use **HH:MM** (e.g. `15:30` or `3:30`).",
+                ephemeral=True,
+            )
+            return
+
+        end_time = start_time + timedelta(minutes=15)
+
+        # Convert to UTC timestamps for Discord formatting
+        start_ts = int(start_time.timestamp())
+        end_ts = int(end_time.timestamp())
+        alert_10_ts = int((start_time + timedelta(minutes=5)).timestamp())
+        alert_5_ts = int((start_time + timedelta(minutes=10)).timestamp())
+
+        embed = discord.Embed(
+            title="⏱️ Grace Period Started",
+            description=(
+                f"**Round Start Time:** <t:{start_ts}:T> (<t:{start_ts}:R>)\n"
+                f"**Grace Period Ends:** <t:{end_ts}:T> (<t:{end_ts}:R>)\n\n"
+                f"📢 Alerts will be sent at:\n"
+                f"• 10 min remaining (<t:{alert_10_ts}:T>)\n"
+                f"• 5 min remaining (<t:{alert_5_ts}:T>)\n"
+                f"• Grace period over (<t:{end_ts}:T>)"
+            ),
+            color=0xF2C21A,
+        )
+        embed.set_footer(text=f"Marshal: {interaction.user.display_name}")
+
+        await interaction.response.send_message(
+            embed=embed,
+            view=GracePeriodCancelView(interaction.channel_id),
+        )
+
+        # Start background countdown
+        marshal_id = interaction.user.id
+        channel_id = interaction.channel_id
+
+        async def _grace_countdown():
+            try:
+                now_utc = datetime.now(timezone.utc)
+                start_utc = start_time.astimezone(timezone.utc)
+                end_utc = end_time.astimezone(timezone.utc)
+                t_10min = start_utc + timedelta(minutes=5)   # 10 min remaining
+                t_5min = start_utc + timedelta(minutes=10)   # 5 min remaining
+
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    return
+
+                marshal_ping = f"<@{marshal_id}>"
+
+                # Wait until round start time
+                wait_until_start = (start_utc - now_utc).total_seconds()
+                if wait_until_start > 0:
+                    await asyncio.sleep(wait_until_start)
+
+                # Wait until 10 min remaining alert (5 min after start)
+                now_utc = datetime.now(timezone.utc)
+                wait_10 = (t_10min - now_utc).total_seconds()
+                if wait_10 > 0:
+                    await asyncio.sleep(wait_10)
+
+                await channel.send(
+                    f"⚠️ **10 MINUTES REMAINING** in the grace period.\n"
+                    f"Teams must start their game and send a **screenshot of the lobby "
+                    f"with their full team**. {marshal_ping}"
+                )
+
+                # Wait until 5 min remaining alert (10 min after start)
+                now_utc = datetime.now(timezone.utc)
+                wait_5 = (t_5min - now_utc).total_seconds()
+                if wait_5 > 0:
+                    await asyncio.sleep(wait_5)
+
+                await channel.send(
+                    f"🚨 **5 MINUTES REMAINING** in the grace period.\n"
+                    f"If the game has not started, **defaults will be issued**.\n"
+                    f"A screenshot of the lobby with your full team is REQUIRED. {marshal_ping}"
+                )
+
+                # Wait until grace period ends (15 min after start)
+                now_utc = datetime.now(timezone.utc)
+                wait_end = (end_utc - now_utc).total_seconds()
+                if wait_end > 0:
+                    await asyncio.sleep(wait_end)
+
+                await channel.send(
+                    f"🔴 **GRACE PERIOD IS OVER.**\n"
+                    f"Teams that have not started their game are subject to **DEFAULT LOSS**.\n"
+                    f"A lobby screenshot with your full team must have been submitted. {marshal_ping}"
+                )
+
+                _grace_period_tasks.pop(channel_id, None)
+
+            except asyncio.CancelledError:
+                pass  # Timer was cancelled via button
+
+        task = asyncio.create_task(_grace_countdown())
+        _grace_period_tasks[channel_id] = (task, marshal_id)
 
 
 async def setup(bot: commands.Bot):
