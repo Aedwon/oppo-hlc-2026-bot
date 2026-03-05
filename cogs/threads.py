@@ -1,7 +1,8 @@
 """
 Cog: Threads
-- /create_threads  -- create private threads with a name prefix, count, and add members by role
-- /delete_threads  -- delete all threads in the current channel
+- /create_threads    -- create private threads with a name prefix, count, and add members by role
+- /delete_threads    -- delete all threads in the current channel
+- /announce_threads  -- mention a role in all private threads of a channel
 - Auto-adds members to linked threads when they receive a linked role
 """
 import discord
@@ -187,6 +188,69 @@ class Threads(commands.Cog):
         await interaction.followup.send(
             f"Deleted {deleted}/{len(threads_to_delete)} threads.", ephemeral=True
         )
+
+    # -- Mention a role in all private threads of a channel -------------------
+
+    @app_commands.command(
+        name="announce_threads",
+        description="Mention a role in all private threads of a selected channel.",
+    )
+    @app_commands.default_permissions(manage_threads=True)
+    @app_commands.describe(
+        channel="Channel whose private threads will receive the mention",
+        role="Role to mention in each thread",
+        message="Optional message to include with the mention",
+    )
+    async def announce_threads(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        role: discord.Role,
+        message: str = None,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        # Collect all private threads (active + archived)
+        threads: list[discord.Thread] = []
+
+        for thread in channel.threads:
+            if thread.type == discord.ChannelType.private_thread:
+                threads.append(thread)
+
+        try:
+            async for thread in channel.archived_threads(private=True, limit=None):
+                if thread not in threads:
+                    threads.append(thread)
+        except discord.Forbidden:
+            pass
+
+        if not threads:
+            await interaction.followup.send(
+                f"No private threads found in {channel.mention}.", ephemeral=True
+            )
+            return
+
+        content = role.mention
+        if message:
+            content += f"\n{message}"
+
+        sent = 0
+        failed = 0
+        for thread in threads:
+            try:
+                # Unarchive if needed so we can send a message
+                if thread.archived:
+                    await thread.edit(archived=False)
+                await thread.send(content)
+                sent += 1
+                await asyncio.sleep(0.5)
+            except Exception:
+                failed += 1
+
+        result = f"✅ Mentioned {role.mention} in **{sent}/{len(threads)}** private threads in {channel.mention}."
+        if failed:
+            result += f"\n⚠️ {failed} thread(s) failed."
+        await interaction.followup.send(result, ephemeral=True)
 
     # -- Auto-add members when they receive a linked role --------------------
 
