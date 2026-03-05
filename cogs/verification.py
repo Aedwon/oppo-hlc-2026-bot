@@ -102,7 +102,12 @@ class VerifyButtonView(discord.ui.View):
             )
             return
 
-        await interaction.response.send_modal(StaffCodeModal())
+        await interaction.response.send_message(
+            "**Staff / Coach Verification**\n\n"
+            "Please select your role below, then click **Continue**.",
+            view=StaffRoleSelectView(),
+            ephemeral=True,
+        )
 
 
 # -- Continue button (shown after guide image) -------------------------------
@@ -114,6 +119,40 @@ class ContinueToModalView(discord.ui.View):
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary)
     async def continue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(VerifyModal())
+
+
+# -- Staff role selection (Coach / Manager dropdown) -------------------------
+
+class StaffRoleSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.selected_role: str | None = None
+
+    @discord.ui.select(
+        placeholder="Select your role...",
+        options=[
+            discord.SelectOption(label="Coach", value="coach", emoji="🏆"),
+            discord.SelectOption(label="Manager", value="manager", emoji="📋"),
+        ],
+    )
+    async def role_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.selected_role = select.values[0]
+        await interaction.response.edit_message(
+            content=(
+                f"**Staff / Coach Verification**\n\n"
+                f"Selected role: **{self.selected_role.title()}**\n"
+                f"Click **Continue** to proceed."
+            ),
+        )
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.success, row=1)
+    async def continue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_role:
+            await interaction.response.send_message(
+                "Please select a role first (Coach or Manager).", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(StaffCodeModal(staff_type=self.selected_role))
 
 
 # -- Verification modal ------------------------------------------------------
@@ -272,8 +311,9 @@ class VerifyModal(discord.ui.Modal):
 # -- Staff / Coach verification modal ----------------------------------------
 
 class StaffCodeModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="Staff / Coach Verification")
+    def __init__(self, staff_type: str):
+        super().__init__(title=f"{staff_type.title()} Verification")
+        self.staff_type = staff_type
 
         self.code_input = discord.ui.TextInput(
             label="Access Code",
@@ -290,15 +330,9 @@ class StaffCodeModal(discord.ui.Modal):
             placeholder="e.g. NU BULLDOGS",
             max_length=100,
         )
-        self.role_input = discord.ui.TextInput(
-            label="Your Role: Coach or Manager",
-            placeholder="Coach or Manager",
-            max_length=20,
-        )
         self.add_item(self.code_input)
         self.add_item(self.ign_input)
         self.add_item(self.team_input)
-        self.add_item(self.role_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -309,15 +343,7 @@ class StaffCodeModal(discord.ui.Modal):
         code = self.code_input.value.strip()
         ign = self.ign_input.value.strip()
         team_input = self.team_input.value.strip()
-        role_input = self.role_input.value.strip().lower()
-
-        # Validate role type
-        if role_input not in ("coach", "manager"):
-            await interaction.followup.send(
-                "Your role must be **Coach** or **Manager**. Please try again.",
-                ephemeral=True,
-            )
-            return
+        role_input = self.staff_type  # Already validated via dropdown
 
         # Validate access code
         stored_code = await Database.get_config(guild.id, "staff_access_code")
@@ -387,7 +413,7 @@ class StaffCodeModal(discord.ui.Modal):
         await Database.execute(
             "INSERT INTO verified_users (guild_id, discord_id, team_name, game_uid, server, staff_type) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
-            (guild.id, user.id, matched_team, "STAFF", "0", role_input),
+            (guild.id, user.id, matched_team, "STAFF", "0", self.staff_type),
         )
 
         # Assign Staff role (1471152576366907534)
