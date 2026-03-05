@@ -2,25 +2,28 @@
 Cog: Verification
 
 Admin commands:
-  /setup_verification       -- send panel with Verify button
-  /set_verification_sheet   -- point to a public Google Sheet for validation
-  /set_verification_guide   -- set the guide image URL shown during verification
-  /toggle_verification_test -- enable/disable test mode
+  /setup_verification        -- send panel with Verify + Staff buttons
+  /set_verification_sheet    -- point to a public Google Sheet for validation
+  /set_verification_guide    -- set the guide image URL shown during verification
+  /toggle_verification_test  -- enable/disable test mode
   /refresh_verification_data -- force-refresh cached sheet data
-  /set_oppo_passphrase      -- set secret passphrase for OPPO role
-  /mention_team             -- mention all verified members of a team
-  /reset_verifications      -- wipe all verification records and roles
+  /set_oppo_passphrase       -- set secret passphrase for OPPO role
+  /set_staff_code            -- set access code for coach/manager verification
+  /mention_team              -- mention all verified members of a team
+  /reset_verifications       -- wipe verification records (granular)
 
-Flow:
+Player flow:
   1. User clicks "Verify" on the panel
   2. Ephemeral guide image is shown (if configured), then modal opens
   3. User enters UID and Server (integers)
   4. Bot validates against the sheet (or test data)
-  5. On match:
-     - Assigns Discord role based on sheet "role" column
-     - Sets nickname to "ABBREV | IGN" from sheet data
-     - Saves to DB
-     - Sends DM with confirmation and tournament instructions
+  5. On match: assigns role, sets nickname, saves to DB, sends DM
+
+Staff flow (coaches/managers):
+  1. User clicks "Staff / Coach" on the panel
+  2. Modal asks for: access code, IGN, team name, role (Coach/Manager)
+  3. Bot validates code + team name against sheet
+  4. On match: assigns Staff role, sets nickname, saves to DB with staff_type
 """
 import discord
 from discord.ext import commands
@@ -82,6 +85,24 @@ class VerifyButtonView(discord.ui.View):
         else:
             # No guide image, go straight to modal
             await interaction.response.send_modal(VerifyModal())
+
+    @discord.ui.button(
+        label="Staff / Coach", style=discord.ButtonStyle.primary,
+        custom_id="staff_verification_start",
+    )
+    async def start_staff_verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Check if already verified
+        row = await Database.fetchone(
+            "SELECT id FROM verified_users WHERE guild_id = %s AND discord_id = %s",
+            (interaction.guild_id, interaction.user.id),
+        )
+        if row:
+            await interaction.response.send_message(
+                "You are already verified!", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(StaffCodeModal())
 
 
 # -- Continue button (shown after guide image) -------------------------------
@@ -248,6 +269,183 @@ class VerifyModal(discord.ui.Modal):
             pass  # DMs disabled
 
 
+# -- Staff / Coach verification modal ----------------------------------------
+
+class StaffCodeModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Staff / Coach Verification")
+
+        self.code_input = discord.ui.TextInput(
+            label="Access Code",
+            placeholder="Enter the staff access code",
+            max_length=100,
+        )
+        self.ign_input = discord.ui.TextInput(
+            label="Your IGN (In-Game Name)",
+            placeholder="e.g. CoachJohn",
+            max_length=50,
+        )
+        self.team_input = discord.ui.TextInput(
+            label="Team Name (from the registration sheet)",
+            placeholder="e.g. NU BULLDOGS",
+            max_length=100,
+        )
+        self.role_input = discord.ui.TextInput(
+            label="Your Role: Coach or Manager",
+            placeholder="Coach or Manager",
+            max_length=20,
+        )
+        self.add_item(self.code_input)
+        self.add_item(self.ign_input)
+        self.add_item(self.team_input)
+        self.add_item(self.role_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        user = interaction.user
+
+        code = self.code_input.value.strip()
+        ign = self.ign_input.value.strip()
+        team_input = self.team_input.value.strip()
+        role_input = self.role_input.value.strip().lower()
+
+        # Validate role type
+        if role_input not in ("coach", "manager"):
+            await interaction.followup.send(
+                "Your role must be **Coach** or **Manager**. Please try again.",
+                ephemeral=True,
+            )
+            return
+
+        # Validate access code
+        stored_code = await Database.get_config(guild.id, "staff_access_code")
+        if not stored_code:
+            await interaction.followup.send(
+                "Staff verification is not configured yet. Please contact an admin.",
+                ephemeral=True,
+            )
+            return
+
+        if code != stored_code:
+            await interaction.followup.send(
+                "Invalid access code. Please check with your tournament admin.",
+                ephemeral=True,
+            )
+            return
+
+        # Race condition guard
+        existing = await Database.fetchone(
+            "SELECT id FROM verified_users WHERE guild_id = %s AND discord_id = %s",
+            (guild.id, user.id),
+        )
+        if existing:
+            await interaction.followup.send("You are already verified!", ephemeral=True)
+            return
+
+        # Fuzzy-match team name against sheet
+        teams = await validator.get_teams()
+        matched_team = None
+        input_lower = team_input.lower()
+
+        # Exact match (case-insensitive)
+        for t in teams:
+            if t.lower() == input_lower:
+                matched_team = t
+                break
+
+        # Partial / substring match
+        if not matched_team:
+            candidates = [t for t in teams if input_lower in t.lower() or t.lower() in input_lower]
+            if len(candidates) == 1:
+                matched_team = candidates[0]
+            elif len(candidates) > 1:
+                suggestion_list = "\n".join(f"• {c}" for c in candidates[:10])
+                await interaction.followup.send(
+                    f"Multiple teams match **{team_input}**. "
+                    f"Please enter the exact team name:\n{suggestion_list}",
+                    ephemeral=True,
+                )
+                return
+
+        if not matched_team:
+            # No match at all — suggest similar teams
+            all_list = "\n".join(f"• {t}" for t in teams[:20])
+            await interaction.followup.send(
+                f"Team **{team_input}** was not found in the registration sheet.\n\n"
+                f"Available teams (showing first 20):\n{all_list}",
+                ephemeral=True,
+            )
+            return
+
+        # Get team abbreviation from sheet
+        roster = await validator.get_team_roster(matched_team)
+        abbrev = roster[0].get("abbrev", "") if roster else ""
+
+        # Insert into DB with staff_type
+        await Database.execute(
+            "INSERT INTO verified_users (guild_id, discord_id, team_name, game_uid, server, staff_type) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (guild.id, user.id, matched_team, "STAFF", "0", role_input),
+        )
+
+        # Assign Staff role (1471152576366907534)
+        staff_role_id = VERIFICATION_ROLES.get("staff")
+        if staff_role_id:
+            role = guild.get_role(staff_role_id)
+            if role:
+                try:
+                    await user.add_roles(role, reason=f"Staff verification: {role_input}")
+                except discord.Forbidden:
+                    pass
+
+        # Also assign fallback role if configured
+        fallback_role_id_str = await Database.get_config(guild.id, "verification_role_id")
+        if fallback_role_id_str:
+            fallback_role = guild.get_role(int(fallback_role_id_str))
+            if fallback_role:
+                try:
+                    await user.add_roles(fallback_role, reason="Staff verification completed")
+                except discord.Forbidden:
+                    pass
+
+        # Set nickname to ABBREV | IGN
+        if abbrev and ign:
+            new_nick = f"{abbrev} | {ign}"
+            try:
+                await user.edit(nick=new_nick, reason=f"Staff verification ({role_input})")
+            except discord.Forbidden:
+                pass
+
+        role_display = role_input.title()  # "Coach" or "Manager"
+
+        await interaction.followup.send(
+            f"You have been verified as **{role_display}** for **{matched_team}**!\n"
+            f"Check your DMs for more details.",
+            ephemeral=True,
+        )
+
+        # Send DM
+        try:
+            dm_embed = discord.Embed(
+                title="Staff Verification Confirmed",
+                description=(
+                    f"You have been verified as **{role_display}** for **{matched_team}**.\n\n"
+                    f"Please wait for a Marshal to mention you in your designated match thread "
+                    f"in <#{MATCH_CHANNEL_ID}> on tournament day.\n\n"
+                    f"Good luck and have fun!"
+                ),
+                color=0x00CC66,
+            )
+            dm_embed.add_field(name="Team", value=matched_team, inline=True)
+            dm_embed.add_field(name="Role", value=role_display, inline=True)
+            if abbrev and ign:
+                dm_embed.add_field(name="Nickname", value=f"{abbrev} | {ign}", inline=True)
+            await user.send(embed=dm_embed)
+        except discord.Forbidden:
+            pass  # DMs disabled
+
 
 # -- Cog ---------------------------------------------------------------------
 
@@ -290,9 +488,9 @@ class Verification(commands.Cog):
         embed = discord.Embed(
             title="Verification",
             description=(
-                "Welcome! Please verify your identity by clicking the button below.\n\n"
-                "You will need your **In-Game UID** and **Server ID** ready.\n"
-                "Both are numbers you can find in your game profile."
+                "Welcome! Please verify your identity by clicking the appropriate button below.\n\n"
+                "**Players:** Click **Verify** — you will need your **In-Game UID** and **Server ID**.\n"
+                "**Coaches / Managers:** Click **Staff / Coach** — you will need the staff access code."
             ),
             color=0xF2C21A,
         )
@@ -473,6 +671,29 @@ class Verification(commands.Cog):
         await interaction.response.send_message(
             f"OPPO passphrase set. Users who type `{clean}` will receive the OPPO role "
             "and their message will be deleted instantly.",
+            ephemeral=True,
+        )
+
+    # -- Admin: set staff access code ----------------------------------------
+
+    @app_commands.command(
+        name="set_staff_code",
+        description="Set the access code for coach/manager staff verification.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(code="The access code coaches/managers enter to verify")
+    async def set_staff_code(
+        self, interaction: discord.Interaction, code: str
+    ):
+        clean = code.strip()
+        await Database.set_config(interaction.guild_id, "staff_access_code", clean)
+        await interaction.response.send_message(
+            f"✅ Staff access code set to `{clean}`.\n\n"
+            "Coaches and managers can now use the **Staff / Coach** button on the "
+            "verification panel. They will need to enter this code, their IGN, "
+            "their team name, and whether they are a Coach or Manager.\n\n"
+            "They will receive the **Staff** role and their nickname will be "
+            "set to **ABBREV | IGN**.",
             ephemeral=True,
         )
 
@@ -767,7 +988,7 @@ class Verification(commands.Cog):
 
         # Get verified users for this team from DB
         db_rows = await Database.fetchall(
-            "SELECT game_uid, discord_id FROM verified_users "
+            "SELECT game_uid, discord_id, staff_type FROM verified_users "
             "WHERE guild_id = %s AND team_name = %s",
             (interaction.guild_id, team),
         )
@@ -785,17 +1006,27 @@ class Verification(commands.Cog):
             else:
                 lines.append(f"❌ **{ign}** — not verified")
 
+        # Append coaches/managers (staff entries not in sheet)
+        staff_rows = [r for r in db_rows if r.get("staff_type")]
+        for sr in staff_rows:
+            staff_label = sr["staff_type"].title()  # "Coach" or "Manager"
+            lines.append(f"🔷 **{staff_label}** — <@{sr['discord_id']}>")
+
         abbrev = roster[0].get("abbrev", "") if roster else ""
         header = f"{team}"
         if abbrev:
             header += f" [{abbrev}]"
+
+        footer_parts = [f"{v_count}/{len(roster)} players verified"]
+        if staff_rows:
+            footer_parts.append(f"{len(staff_rows)} staff")
 
         embed = discord.Embed(
             title=header,
             description="\n".join(lines),
             color=0x00CC66 if v_count == len(roster) else (0xF2C21A if v_count > 0 else 0xFF4444),
         )
-        embed.set_footer(text=f"{v_count}/{len(roster)} verified")
+        embed.set_footer(text=" • ".join(footer_parts))
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # -- Marshal: list all unverified players ---------------------------------

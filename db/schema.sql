@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS verified_users (
     team_name   VARCHAR(100)    NOT NULL,
     game_uid    VARCHAR(50)     NOT NULL,
     server      VARCHAR(50)     NOT NULL,
+    staff_type  VARCHAR(20)     DEFAULT NULL,
     verified_at TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_guild_user (guild_id, discord_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

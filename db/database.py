@@ -61,6 +61,7 @@ class Database:
         migrations = [
             # (table, column, column_definition, after_column)
             ("spawned_vcs", "team_name", "VARCHAR(100) DEFAULT NULL", "owner_id"),
+            ("verified_users", "staff_type", "VARCHAR(20) DEFAULT NULL", "server"),
         ]
         async with cls._pool.acquire() as conn:
             async with conn.cursor() as cur:
