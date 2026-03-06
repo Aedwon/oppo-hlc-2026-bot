@@ -28,6 +28,7 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 # Cog list — loaded in order (dependencies first)
 # -------------------------------------------------------------------
 COGS = [
+    "cogs.logging",
     "cogs.verification",
     "cogs.tickets",
     "cogs.embeds",

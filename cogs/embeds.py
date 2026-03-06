@@ -17,7 +17,7 @@ import pytz
 import asyncio
 
 from db.database import Database
-from utils.constants import EMBED_LOG_CHANNEL_ID
+from utils.logger import get_log_channel
 from utils.views import CancelScheduledEmbedView
 
 
@@ -126,7 +126,7 @@ class Embeds(commands.Cog):
             )
             message_link = f"https://discord.com/channels/{channel.guild.id}/{channel.id}/{sent_message.id}"
 
-            log_channel = channel.guild.get_channel(EMBED_LOG_CHANNEL_ID)
+            log_channel = await get_log_channel(self.bot, channel.guild.id, "embeds")
             user_mention = f"<@{entry['user_id']}>"
             if log_channel:
                 await log_channel.send(
@@ -241,7 +241,7 @@ class Embeds(commands.Cog):
             )
 
             # Log preview
-            log_channel = interaction.guild.get_channel(EMBED_LOG_CHANNEL_ID)
+            log_channel = await get_log_channel(self.bot, interaction.guild_id, "embeds")
             if log_channel:
                 await log_channel.send(
                     content=(
@@ -264,7 +264,7 @@ class Embeds(commands.Cog):
             f"✅ Embed sent to {channel.mention}: [Jump to Message]({message_link})", ephemeral=True,
         )
 
-        log_channel = interaction.guild.get_channel(EMBED_LOG_CHANNEL_ID)
+        log_channel = await get_log_channel(self.bot, interaction.guild_id, "embeds")
         if log_channel:
             log_embed = discord.Embed(title="📢 Embed Sent", color=discord.Color.gold())
             log_embed.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)

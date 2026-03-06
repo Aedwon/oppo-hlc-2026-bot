@@ -597,8 +597,12 @@ class MoveCategoryView(discord.ui.View):
 # ── Helpers ─────────────────────────────────────────────────────
 
 async def get_log_channel(bot, guild_id: int):
-    """Resolve ticket log channel: DB config first, then env fallback."""
-    cfg = await Database.get_config(guild_id, "ticket_log_channel_id")
+    """Resolve ticket log channel: centralized key first, legacy key, then env fallback."""
+    # Try centralized key first (log_channel_tickets)
+    cfg = await Database.get_config(guild_id, "log_channel_tickets")
+    if not cfg:
+        # Fallback to legacy key
+        cfg = await Database.get_config(guild_id, "ticket_log_channel_id")
     cid = int(cfg) if cfg else TICKET_LOG_CHANNEL_ID
     return bot.get_channel(cid) if cid else None
 
@@ -1092,6 +1096,8 @@ class Tickets(commands.Cog):
     async def set_ticket_log(
         self, interaction: discord.Interaction, channel: discord.TextChannel
     ):
+        # Write to both keys: centralized + legacy for backward compatibility
+        await Database.set_config(interaction.guild_id, "log_channel_tickets", str(channel.id))
         await Database.set_config(interaction.guild_id, "ticket_log_channel_id", str(channel.id))
         await interaction.response.send_message(
             f"Ticket log channel set to {channel.mention}.",
