@@ -677,7 +677,7 @@ class Verification(commands.Cog):
 
     @app_commands.command(
         name="refresh_verification_data",
-        description="Force-refresh the cached verification sheet data.",
+        description="Clear all cached sheet data and re-fetch from Google Sheets.",
     )
     @app_commands.default_permissions(administrator=True)
     async def refresh_verification_data(self, interaction: discord.Interaction):
@@ -693,9 +693,23 @@ class Verification(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
+
+        # Fully nuke in-memory cache first
+        validator.clear_cache()
+
+        # Force fresh fetch
         count = await validator.refresh()
+
+        # Show diagnostic info: sample teams so you can verify it's fresh
+        entries = await validator.get_all_entries()
+        teams = sorted(set(e.get("team_name", "") for e in entries if e.get("team_name")))
+        sample = ", ".join(teams[:10]) + ("..." if len(teams) > 10 else "")
+
         await interaction.followup.send(
-            f"Sheet data refreshed. **{count}** entries loaded.", ephemeral=True
+            f"✅ Cache cleared and data re-fetched.\n"
+            f"**Entries loaded:** {count}\n"
+            f"**Teams found ({len(teams)}):** {sample}",
+            ephemeral=True,
         )
 
     # -- Admin: set OPPO passphrase ------------------------------------------

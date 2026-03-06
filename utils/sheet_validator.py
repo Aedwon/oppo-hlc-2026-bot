@@ -176,12 +176,18 @@ class SheetValidator:
     async def refresh(self) -> int:
         """Force a cache refresh. Returns the number of entries loaded."""
         async with self._lock:
-            # Invalidate cache so _fetch doesn't return stale data on error
+            # Fully nuke old cache so _fetch can't fall back to stale data
+            self._cache = None
             self._cache_ts = 0
             entries = await self._fetch()
             self._cache = entries
             self._cache_ts = time.monotonic()
             return len(entries)
+
+    def clear_cache(self):
+        """Immediately nuke in-memory cache. Next access will force a fresh fetch."""
+        self._cache = None
+        self._cache_ts = 0
 
     # ----- Internal ---------------------------------------------------------
 
@@ -210,7 +216,11 @@ class SheetValidator:
             url = _build_csv_url(self._sheet_id, self._gid)
 
         try:
-            async with aiohttp.ClientSession() as session:
+            headers = {
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+            }
+            async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status != 200:
                         print(f"Sheet fetch failed (HTTP {resp.status}), using cached data")
