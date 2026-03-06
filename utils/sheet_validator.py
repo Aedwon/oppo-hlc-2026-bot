@@ -64,19 +64,21 @@ def _extract_sheet_id(url_or_id: str) -> str:
 
 
 def _build_csv_url(sheet_id: str, gid: str = "0") -> str:
-    """Build CSV export URL using GID (legacy)."""
+    """Build CSV export URL using GID (legacy), with cache-busting."""
+    ts = int(time.time())
     return (
         f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-        f"/export?format=csv&gid={gid}"
+        f"/export?format=csv&gid={gid}&_={ts}"
     )
 
 
 def _build_csv_url_by_name(sheet_id: str, tab_name: str) -> str:
-    """Build CSV export URL using sheet tab name."""
+    """Build CSV export URL using sheet tab name, with cache-busting."""
     encoded = urllib.parse.quote(tab_name)
+    ts = int(time.time())
     return (
         f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-        f"/gviz/tq?tqx=out:csv&sheet={encoded}"
+        f"/gviz/tq?tqx=out:csv&sheet={encoded}&_={ts}"
     )
 
 
@@ -174,6 +176,8 @@ class SheetValidator:
     async def refresh(self) -> int:
         """Force a cache refresh. Returns the number of entries loaded."""
         async with self._lock:
+            # Invalidate cache so _fetch doesn't return stale data on error
+            self._cache_ts = 0
             entries = await self._fetch()
             self._cache = entries
             self._cache_ts = time.monotonic()

@@ -1263,6 +1263,10 @@ class Verification(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
+        # Force-refresh sheet cache so re-verification uses latest data
+        if not validator.is_test_mode:
+            await validator.refresh()
+
         guild = interaction.guild
         roles_to_remove = await self._get_verification_roles(guild)
 
