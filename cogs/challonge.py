@@ -312,24 +312,13 @@ class Challonge(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"❌ Error fetching matches: {e}")
 
-    # -- /challonge_report -----------------------------------------------------
+    # -- /challonge_report (multi-step interactive) ----------------------------
 
     @app_commands.command(
         name="challonge_report",
-        description="Report a match result to the linked Challonge bracket.",
+        description="Report a match result to the linked Challonge bracket (guided).",
     )
-    @app_commands.describe(
-        match_number="Match number from /challonge_matches",
-        winner="Name of the winning team/player",
-        score="Score in X-Y format (e.g. 2-1)",
-    )
-    async def challonge_report(
-        self,
-        interaction: discord.Interaction,
-        match_number: int,
-        winner: str,
-        score: str,
-    ):
+    async def challonge_report(self, interaction: discord.Interaction):
         if not await _is_marshal_or_admin(interaction):
             await interaction.response.send_message(
                 "❌ You need the Marshal role or Admin to report results.", ephemeral=True
@@ -343,97 +332,87 @@ class Challonge(commands.Cog):
             )
             return
 
-        # Validate score format
-        if not re.match(r"^\d+-\d+$", score):
-            await interaction.response.send_message(
-                "❌ Invalid score format. Use **X-Y** (e.g. `2-1`, `3-0`).", ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         try:
             client = self._get_client()
             slug = bracket["tournament_slug"]
 
-            # Fetch all matches to find the target
-            matches = await client.get_matches(slug, state="all")
-            target = None
-            for m in matches:
-                if (m.get("suggested_play_order") or m.get("id")) == match_number:
-                    target = m
-                    break
-
-            if not target:
-                await interaction.followup.send(f"❌ Match #{match_number} not found.")
-                return
-
-            if target.get("state") == "complete":
+            # Fetch open matches
+            matches = await client.get_matches(slug, state="open")
+            if not matches:
                 await interaction.followup.send(
-                    f"❌ Match #{match_number} already has a result.\n"
-                    f"Score: {target.get('scores_csv', 'N/A')}"
+                    "📋 No open matches to report. All matches may be completed or pending.",
+                    ephemeral=True,
                 )
                 return
 
-            if not target.get("player1_id") or not target.get("player2_id"):
-                await interaction.followup.send(
-                    f"❌ Match #{match_number} is pending — waiting for previous matches."
-                )
-                return
-
-            # Resolve winner
+            # Build participant cache
             participants = await client.get_participants(slug)
             participant_cache = build_participant_cache(participants)
 
-            found = find_participant_by_name(participant_cache, winner)
-            if not found:
-                p1 = participant_cache.get(target["player1_id"], "Unknown")
-                p2 = participant_cache.get(target["player2_id"], "Unknown")
+            # Filter to matches with both players assigned (not TBD)
+            reportable = [
+                m for m in matches
+                if m.get("player1_id") and m.get("player2_id")
+            ]
+            if not reportable:
                 await interaction.followup.send(
-                    f"❌ Participant '{winner}' not found.\n"
-                    f"This match is between: **{p1}** vs **{p2}**"
+                    "⏳ All open matches are waiting for previous results. "
+                    "No matches can be reported yet.",
+                    ephemeral=True,
                 )
                 return
 
-            winner_id, winner_name = found
+            # Sort by play order
+            reportable.sort(
+                key=lambda m: m.get("suggested_play_order") or m.get("id") or 0
+            )
 
-            # Verify winner is actually in this match
-            if winner_id not in (target.get("player1_id"), target.get("player2_id")):
-                p1 = participant_cache.get(target["player1_id"], "Unknown")
-                p2 = participant_cache.get(target["player2_id"], "Unknown")
-                await interaction.followup.send(
-                    f"❌ **{winner_name}** is not in match #{match_number}.\n"
-                    f"This match is between: **{p1}** vs **{p2}**"
+            # Cap at 25 (Select Menu limit)
+            reportable = reportable[:25]
+
+            # Build select options
+            options = []
+            for m in reportable:
+                order = m.get("suggested_play_order") or m.get("id", "?")
+                p1 = participant_cache.get(m["player1_id"], "TBD")
+                p2 = participant_cache.get(m["player2_id"], "TBD")
+                label = f"#{order}: {p1} vs {p2}"
+                # Discord labels max 100 chars
+                if len(label) > 100:
+                    label = label[:97] + "…"
+                options.append(
+                    discord.SelectOption(
+                        label=label,
+                        value=str(m["id"]),
+                        description=f"Match #{order}",
+                    )
                 )
-                return
 
-            # Report
-            await client.update_match(slug, target["id"], winner_id, score)
-
-            loser_id = (
-                target["player1_id"]
-                if winner_id == target["player2_id"]
-                else target["player2_id"]
+            view = _MatchSelectView(
+                options=options,
+                matches={m["id"]: m for m in reportable},
+                participant_cache=participant_cache,
+                client=client,
+                slug=slug,
+                reporter=interaction.user,
             )
-            loser_name = participant_cache.get(loser_id, "Unknown")
 
-            embed = discord.Embed(
-                title="✅ Match Result Reported",
-                color=0x00CC66,
-                timestamp=datetime.now(timezone.utc),
+            await interaction.followup.send(
+                "**Step 1/3:** Select the match to report:",
+                view=view,
+                ephemeral=True,
             )
-            embed.add_field(name="Match", value=f"#{match_number}", inline=True)
-            embed.add_field(name="Score", value=score, inline=True)
-            embed.add_field(name="Winner", value=f"🏆 {winner_name}", inline=False)
-            embed.add_field(name="Loser", value=loser_name, inline=False)
-            embed.set_footer(text=f"Reported by {interaction.user.display_name}")
-
-            await interaction.followup.send(embed=embed)
 
         except ChallongeAPIError as e:
-            await interaction.followup.send(f"❌ Challonge API error: {e.message}")
+            await interaction.followup.send(
+                f"❌ Challonge API error: {e.message}", ephemeral=True
+            )
         except Exception as e:
-            await interaction.followup.send(f"❌ Error reporting result: {e}")
+            await interaction.followup.send(
+                f"❌ Error fetching matches: {e}", ephemeral=True
+            )
 
     # -- /challonge_bracket ----------------------------------------------------
 
@@ -517,6 +496,296 @@ class Challonge(commands.Cog):
             await interaction.followup.send(embed=embed)
         except Exception as e:
             await interaction.followup.send(f"❌ Error fetching bracket info: {e}")
+
+
+# ────────────────────────────────────────────────────────────────
+# Interactive multi-step Views for challonge_report
+# ────────────────────────────────────────────────────────────────
+
+class _MatchSelectView(discord.ui.View):
+    """Step 1: Select the match to report."""
+
+    def __init__(
+        self,
+        *,
+        options: list[discord.SelectOption],
+        matches: dict,
+        participant_cache: dict,
+        client,
+        slug: str,
+        reporter,
+    ):
+        super().__init__(timeout=120)
+        self.matches = matches
+        self.participant_cache = participant_cache
+        self.client = client
+        self.slug = slug
+        self.reporter = reporter
+
+        select = discord.ui.Select(
+            placeholder="Choose a match…",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.reporter.id:
+            await interaction.response.send_message(
+                "❌ Only the person who started this report can use this.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _on_select(self, interaction: discord.Interaction):
+        match_id = int(interaction.data["values"][0])
+        match = self.matches.get(match_id)
+
+        if not match:
+            await interaction.response.edit_message(
+                content="❌ Match not found. It may have been completed already.",
+                view=None,
+            )
+            return
+
+        p1_id = match.get("player1_id")
+        p2_id = match.get("player2_id")
+        p1_name = self.participant_cache.get(p1_id, "Unknown")
+        p2_name = self.participant_cache.get(p2_id, "Unknown")
+        order = match.get("suggested_play_order") or match.get("id", "?")
+
+        # Build winner select with exactly 2 options
+        options = [
+            discord.SelectOption(
+                label=p1_name[:100],
+                value=str(p1_id),
+                description=f"Select {p1_name[:90]} as the winner",
+                emoji="🏆",
+            ),
+            discord.SelectOption(
+                label=p2_name[:100],
+                value=str(p2_id),
+                description=f"Select {p2_name[:90]} as the winner",
+                emoji="🏆",
+            ),
+        ]
+
+        view = _WinnerSelectView(
+            options=options,
+            match=match,
+            participant_cache=self.participant_cache,
+            client=self.client,
+            slug=self.slug,
+            reporter=self.reporter,
+        )
+
+        await interaction.response.edit_message(
+            content=(
+                f"**Step 2/3:** Match **#{order}** — "
+                f"**{p1_name}** vs **{p2_name}**\n"
+                "Select the winner:"
+            ),
+            view=view,
+        )
+        self.stop()
+
+    async def on_timeout(self):
+        pass  # Ephemeral message, auto-cleans
+
+
+class _WinnerSelectView(discord.ui.View):
+    """Step 2: Select the winner."""
+
+    def __init__(
+        self,
+        *,
+        options: list[discord.SelectOption],
+        match: dict,
+        participant_cache: dict,
+        client,
+        slug: str,
+        reporter,
+    ):
+        super().__init__(timeout=120)
+        self.match = match
+        self.participant_cache = participant_cache
+        self.client = client
+        self.slug = slug
+        self.reporter = reporter
+
+        select = discord.ui.Select(
+            placeholder="Choose the winner…",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.reporter.id:
+            await interaction.response.send_message(
+                "❌ Only the person who started this report can use this.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _on_select(self, interaction: discord.Interaction):
+        winner_id = int(interaction.data["values"][0])
+        winner_name = self.participant_cache.get(winner_id, "Unknown")
+
+        modal = _ScoreModal(
+            match=self.match,
+            winner_id=winner_id,
+            winner_name=winner_name,
+            participant_cache=self.participant_cache,
+            client=self.client,
+            slug=self.slug,
+            reporter=self.reporter,
+        )
+        await interaction.response.send_modal(modal)
+        self.stop()
+
+    async def on_timeout(self):
+        pass
+
+
+class _ScoreModal(discord.ui.Modal, title="Enter Match Score"):
+    """Step 3: Enter the score."""
+
+    score_input = discord.ui.TextInput(
+        label="Score (X-Y format, e.g. 2-1 or 3-0)",
+        placeholder="2-1",
+        min_length=3,
+        max_length=10,
+        required=True,
+    )
+
+    def __init__(
+        self,
+        *,
+        match: dict,
+        winner_id: int,
+        winner_name: str,
+        participant_cache: dict,
+        client,
+        slug: str,
+        reporter,
+    ):
+        super().__init__(timeout=120)
+        self.match = match
+        self.winner_id = winner_id
+        self.winner_name = winner_name
+        self.participant_cache = participant_cache
+        self.client = client
+        self.slug = slug
+        self.reporter = reporter
+
+    async def on_submit(self, interaction: discord.Interaction):
+        score = self.score_input.value.strip()
+
+        # Validate format
+        if not re.match(r"^\d+-\d+$", score):
+            await interaction.response.send_message(
+                "❌ Invalid score format. Use **X-Y** (e.g. `2-1`, `3-0`).\n"
+                "Please run `/challonge_report` again.",
+                ephemeral=True,
+            )
+            return
+
+        # Auto-orient score: Challonge expects scores from player1's perspective
+        parts = score.split("-")
+        s1, s2 = int(parts[0]), int(parts[1])
+        p1_id = self.match.get("player1_id")
+
+        if self.winner_id == p1_id:
+            # Winner is player1 — their score (higher) goes first
+            oriented_score = f"{max(s1, s2)}-{min(s1, s2)}"
+        else:
+            # Winner is player2 — their score (higher) goes second
+            oriented_score = f"{min(s1, s2)}-{max(s1, s2)}"
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        try:
+            # Re-check match state (race condition guard)
+            matches = await self.client.get_matches(self.slug, state="all")
+            current = None
+            for m in matches:
+                if m.get("id") == self.match["id"]:
+                    current = m
+                    break
+
+            if not current:
+                await interaction.followup.send(
+                    "❌ Match not found. It may have been removed.",
+                    ephemeral=True,
+                )
+                return
+
+            if current.get("state") == "complete":
+                await interaction.followup.send(
+                    "❌ This match was already reported while you were filling in the score.\n"
+                    f"Existing score: {current.get('scores_csv', 'N/A')}",
+                    ephemeral=True,
+                )
+                return
+
+            # Submit to Challonge
+            await self.client.update_match(
+                self.slug, self.match["id"], self.winner_id, oriented_score
+            )
+
+            order = self.match.get("suggested_play_order") or self.match.get("id", "?")
+            loser_id = (
+                self.match["player1_id"]
+                if self.winner_id == self.match["player2_id"]
+                else self.match["player2_id"]
+            )
+            loser_name = self.participant_cache.get(loser_id, "Unknown")
+
+            embed = discord.Embed(
+                title="✅ Match Result Reported",
+                color=0x00CC66,
+                timestamp=datetime.now(timezone.utc),
+            )
+            embed.add_field(name="Match", value=f"#{order}", inline=True)
+            embed.add_field(name="Score", value=oriented_score, inline=True)
+            embed.add_field(
+                name="Winner", value=f"🏆 {self.winner_name}", inline=False
+            )
+            embed.add_field(name="Loser", value=loser_name, inline=False)
+            embed.set_footer(
+                text=f"Reported by {self.reporter.display_name}"
+            )
+
+            # Post result publicly so everyone sees it
+            channel = interaction.channel
+            await channel.send(embed=embed)
+            await interaction.followup.send(
+                "✅ Result submitted!", ephemeral=True
+            )
+
+        except ChallongeAPIError as e:
+            await interaction.followup.send(
+                f"❌ Challonge API error: {e.message}", ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ Error reporting result: {e}", ephemeral=True
+            )
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception
+    ):
+        await interaction.response.send_message(
+            f"❌ An error occurred: {error}. Please try `/challonge_report` again.",
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot):
