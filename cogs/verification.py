@@ -8,6 +8,7 @@ Admin commands:
   /toggle_verification_test  -- enable/disable test mode
   /refresh_verification_data -- force-refresh cached sheet data
   /set_oppo_passphrase       -- set secret passphrase for OPPO role
+  /set_production_passphrase -- set secret passphrase + role for production team
   /set_staff_code            -- set access code for coach/manager verification
   /mention_team              -- mention all verified members of a team
   /reset_verifications       -- wipe verification records (granular)
@@ -731,6 +732,29 @@ class Verification(commands.Cog):
             ephemeral=True,
         )
 
+    # -- Admin: set production passphrase ------------------------------------
+
+    @app_commands.command(
+        name="set_production_passphrase",
+        description="Set the secret passphrase and role for production team verification.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(
+        passphrase="The passphrase users type to get the production role",
+        role="The role to assign when the passphrase is used",
+    )
+    async def set_production_passphrase(
+        self, interaction: discord.Interaction, passphrase: str, role: discord.Role
+    ):
+        clean = passphrase.strip()
+        await Database.set_config(interaction.guild_id, "production_passphrase", clean)
+        await Database.set_config(interaction.guild_id, "production_role_id", str(role.id))
+        await interaction.response.send_message(
+            f"Production passphrase set. Users who type `{clean}` will receive {role.mention} "
+            "and their message will be deleted instantly.",
+            ephemeral=True,
+        )
+
     # -- Admin: set staff access code ----------------------------------------
 
     @app_commands.command(
@@ -1382,48 +1406,90 @@ class Verification(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
-        passphrase = await Database.get_config(message.guild.id, "oppo_passphrase")
-        if not passphrase:
-            passphrase = "!OPPOteam"
+        content = message.content.strip()
 
-        if message.content.strip() != passphrase:
-            return
+        # --- OPPO passphrase ---
+        oppo_passphrase = await Database.get_config(message.guild.id, "oppo_passphrase")
+        if not oppo_passphrase:
+            oppo_passphrase = "!OPPOteam"
 
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.NotFound):
-            pass
-
-        oppo_role_id = VERIFICATION_ROLES.get("oppo")
-        if not oppo_role_id:
-            return
-
-        role = message.guild.get_role(oppo_role_id)
-        if not role:
-            return
-
-        if role in message.author.roles:
+        if content == oppo_passphrase:
             try:
-                await message.author.send("You already have the OPPO role!")
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound):
+                pass
+
+            oppo_role_id = VERIFICATION_ROLES.get("oppo")
+            if not oppo_role_id:
+                return
+
+            role = message.guild.get_role(oppo_role_id)
+            if not role:
+                return
+
+            if role in message.author.roles:
+                try:
+                    await message.author.send("You already have the OPPO role!")
+                except discord.Forbidden:
+                    pass
+                return
+
+            try:
+                await message.author.add_roles(role, reason="OPPO passphrase verification")
+            except discord.Forbidden:
+                try:
+                    await message.author.send("Could not assign the OPPO role (missing permissions).")
+                except discord.Forbidden:
+                    pass
+                return
+
+            try:
+                await message.author.send(
+                    "You have been verified as **OPPO** team. Welcome!"
+                )
             except discord.Forbidden:
                 pass
             return
 
-        try:
-            await message.author.add_roles(role, reason="OPPO passphrase verification")
-        except discord.Forbidden:
+        # --- Production passphrase ---
+        prod_passphrase = await Database.get_config(message.guild.id, "production_passphrase")
+        if prod_passphrase and content == prod_passphrase:
             try:
-                await message.author.send("Could not assign the OPPO role (missing permissions).")
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound):
+                pass
+
+            prod_role_id_str = await Database.get_config(message.guild.id, "production_role_id")
+            if not prod_role_id_str:
+                return
+
+            role = message.guild.get_role(int(prod_role_id_str))
+            if not role:
+                return
+
+            if role in message.author.roles:
+                try:
+                    await message.author.send("You already have the Production role!")
+                except discord.Forbidden:
+                    pass
+                return
+
+            try:
+                await message.author.add_roles(role, reason="Production passphrase verification")
+            except discord.Forbidden:
+                try:
+                    await message.author.send("Could not assign the Production role (missing permissions).")
+                except discord.Forbidden:
+                    pass
+                return
+
+            try:
+                await message.author.send(
+                    f"You have been verified as **Production** team and received the **{role.name}** role. Welcome!"
+                )
             except discord.Forbidden:
                 pass
             return
-
-        try:
-            await message.author.send(
-                "You have been verified as **OPPO** team. Welcome!"
-            )
-        except discord.Forbidden:
-            pass
 
 
 async def setup(bot: commands.Bot):
