@@ -158,6 +158,8 @@ CREATE TABLE IF NOT EXISTS match_sessions (
     channel_id          BIGINT UNSIGNED NOT NULL,
     marshal_id          BIGINT UNSIGNED NOT NULL,
     best_of             TINYINT UNSIGNED NOT NULL DEFAULT 3,
+    team1               VARCHAR(100)    DEFAULT NULL,
+    team2               VARCHAR(100)    DEFAULT NULL,
     status              ENUM('ongoing','checking_ack','ended') NOT NULL DEFAULT 'ongoing',
     is_disputed         BOOLEAN         NOT NULL DEFAULT FALSE,
     ack_start_time      DATETIME        DEFAULT NULL,

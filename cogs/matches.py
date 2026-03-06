@@ -5,27 +5,32 @@ Admin commands:
   /set_marshal_role    -- configure which role acts as Marshal
 
 Marshal / Admin commands:
-  /match_start         -- start a BO(X) match session in the channel
+  /match_start         -- start a BO(X) match session (with team names)
+  /game_started        -- signal game begun; cancels grace period
   /game_result         -- log a game result, triggers ack flow + 5-min auto-ack
   /match_undo_game     -- remove the last logged game
   /match_force_ack     -- force-acknowledge for a team (5 min cooldown)
   /match_end           -- end the match (validates enough games)
   /match_cancel        -- force-cancel without saving
+  /match_history       -- view recent match results
   /grace_period        -- start a 15-min grace period countdown
 
 Anyone:
   /match_status        -- view current match state
 
 Flow:
-  1. Marshal starts a match session with /match_start
-  2. After each game, marshal logs the result with /game_result
-  3. 5-minute dispute window auto-starts; teams type "I acknowledge"
-  4. If both teams ack → window closes, result is final
-  5. If 5 min expires → auto-force-ack, result is final
-  6. Anyone can file a dispute (pauses ack timer)
-  7. Match ends when enough games are played and marshal uses /match_end
+  1. Marshal starts grace period with /grace_period (optional)
+  2. Marshal starts a match session with /match_start (with team names)
+  3. Marshal signals game begin with /game_started (cancels grace period)
+  4. After each game, marshal logs the result with /game_result
+  5. 5-minute dispute window auto-starts; teams type "I acknowledge"
+  6. If both teams ack -> window closes, result is final
+  7. If 5 min expires -> auto-force-ack, result is final
+  8. Anyone can file a dispute (pauses ack timer)
+  9. Match ends when enough games are played and marshal uses /match_end
 """
 import asyncio
+import re
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -68,6 +73,8 @@ class MatchSession:
         channel_id: int,
         marshal_id: int,
         best_of: int,
+        team1: Optional[str] = None,
+        team2: Optional[str] = None,
         status: str = "ongoing",
         is_disputed: bool = False,
         ack_start_time: Optional[datetime] = None,
@@ -82,6 +89,8 @@ class MatchSession:
         self.channel_id = channel_id
         self.marshal_id = marshal_id
         self.best_of = best_of
+        self.team1 = team1
+        self.team2 = team2
         self.status = status
         self.is_disputed = is_disputed
         self.ack_start_time = ack_start_time
@@ -99,7 +108,7 @@ class MatchSession:
         await Database.execute(
             "UPDATE match_sessions SET status=%s, is_disputed=%s, "
             "ack_start_time=%s, dispute_start_time=%s, total_dispute_seconds=%s, "
-            "last_message_id=%s, ended_at=%s WHERE id=%s",
+            "last_message_id=%s, team1=%s, team2=%s, ended_at=%s WHERE id=%s",
             (
                 self.status,
                 self.is_disputed,
@@ -107,6 +116,8 @@ class MatchSession:
                 self.dispute_start_time,
                 self.total_dispute_seconds,
                 self.last_message_id,
+                self.team1,
+                self.team2,
                 datetime.now(timezone.utc) if self.status == "ended" else None,
                 self.db_id,
             ),
@@ -210,12 +221,39 @@ class MatchSession:
             return self.best_of
         return (self.best_of // 2) + 1
 
-    def get_summary_embed(self) -> discord.Embed:
+    def get_team_label(self, slot: int = 1) -> str:
+        """Return team1 or team2 label, with fallback."""
+        name = self.team1 if slot == 1 else self.team2
+        return name if name else ("Team A" if slot == 1 else "Team B")
+
+    def get_series_score(self) -> tuple[int, int]:
+        """Parse game results to tally wins. Returns (team1_wins, team2_wins).
+
+        Looks for 'X - Y' pattern in the result string.
+        The first number is attributed to team1, second to team2.
+        """
+        import re
+        t1_wins = 0
+        t2_wins = 0
+        for game in self.games:
+            result = game.get("result", "")
+            match = re.search(r'(\d+)\s*[-\u2013]\s*(\d+)', result)
+            if match:
+                s1, s2 = int(match.group(1)), int(match.group(2))
+                if s1 > s2:
+                    t1_wins += 1
+                elif s2 > s1:
+                    t2_wins += 1
+        return t1_wins, t2_wins
+
+    def get_summary_embed(self, *, final: bool = False) -> discord.Embed:
         """Build a rich embed summarising the match."""
-        embed = discord.Embed(
-            title=f"🏆 Match Session (BO{self.best_of})",
-            color=0xF2C21A,
-        )
+        title_parts = ["🏆"]
+        if self.team1 and self.team2:
+            title_parts.append(f"{self.team1} vs {self.team2}")
+        title_parts.append(f"(BO{self.best_of})")
+
+        embed = discord.Embed(title=" ".join(title_parts), color=0xF2C21A)
 
         if not self.games:
             embed.description = "No games logged yet."
@@ -230,8 +268,27 @@ class MatchSession:
                 status = f"⚠️ Waiting ({ack_count}/2)"
             lines.append(f"**Game {game['game_number']}:** {game['result']} — {status}")
 
+        # Series score
+        t1_wins, t2_wins = self.get_series_score()
+        t1_label = self.get_team_label(1)
+        t2_label = self.get_team_label(2)
+        lines.append(f"\n**Series Score:** {t1_label} **{t1_wins}** – **{t2_wins}** {t2_label}")
+
+        if final:
+            # Duration
+            if self.started_at:
+                duration = datetime.now(timezone.utc) - self.started_at
+                mins = int(duration.total_seconds() // 60)
+                lines.append(f"**Duration:** {mins} minute{'s' if mins != 1 else ''}")
+            # Winner
+            if t1_wins > t2_wins:
+                lines.append(f"\n🥇 **Winner: {t1_label}**")
+            elif t2_wins > t1_wins:
+                lines.append(f"\n🥇 **Winner: {t2_label}**")
+            else:
+                lines.append("\n🤝 **Series Tied**")
+
         embed.description = "\n".join(lines)
-        embed.set_footer(text=f"Marshal: ID {self.marshal_id}")
         return embed
 
 
@@ -380,7 +437,7 @@ class EndMatchView(discord.ui.View):
 
         await interaction.response.edit_message(
             content="✅ **Match session ended.**",
-            embed=self.session.get_summary_embed(),
+            embed=self.session.get_summary_embed(final=True),
             view=None,
         )
         self.stop()
@@ -440,6 +497,8 @@ class Matches(commands.Cog):
                 channel_id=row["channel_id"],
                 marshal_id=row["marshal_id"],
                 best_of=row["best_of"],
+                team1=row.get("team1"),
+                team2=row.get("team2"),
                 status=row["status"],
                 is_disputed=bool(row["is_disputed"]),
                 ack_start_time=row["ack_start_time"],
@@ -558,8 +617,19 @@ class Matches(commands.Cog):
     # -- /match_start ----------------------------------------------------------
 
     @app_commands.command(name="match_start", description="Start a match session in this channel.")
-    @app_commands.describe(best_of="Best of X (1, 2, 3, 5). Default: 3")
-    async def match_start(self, interaction: discord.Interaction, best_of: int = 3):
+    @app_commands.describe(
+        best_of="Best of X (1, 2, 3, 5). Default: 3",
+        team1="Name of team 1 (optional)",
+        team2="Name of team 2 (optional)",
+    )
+    @app_commands.autocomplete(team1=_team_autocomplete, team2=_team_autocomplete)
+    async def match_start(
+        self,
+        interaction: discord.Interaction,
+        best_of: int = 3,
+        team1: str | None = None,
+        team2: str | None = None,
+    ):
         if not await _is_marshal_or_admin(interaction):
             await interaction.response.send_message("❌ You need the Marshal role or Admin to do this.", ephemeral=True)
             return
@@ -578,9 +648,13 @@ class Matches(commands.Cog):
 
         await interaction.response.defer()
 
+        t1 = team1.strip() if team1 else None
+        t2 = team2.strip() if team2 else None
+
         db_id = await Database.insert_get_id(
-            "INSERT INTO match_sessions (guild_id, channel_id, marshal_id, best_of) VALUES (%s, %s, %s, %s)",
-            (interaction.guild_id, interaction.channel_id, interaction.user.id, best_of),
+            "INSERT INTO match_sessions (guild_id, channel_id, marshal_id, best_of, team1, team2) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (interaction.guild_id, interaction.channel_id, interaction.user.id, best_of, t1, t2),
         )
 
         session = MatchSession(
@@ -589,21 +663,69 @@ class Matches(commands.Cog):
             channel_id=interaction.channel_id,
             marshal_id=interaction.user.id,
             best_of=best_of,
+            team1=t1,
+            team2=t2,
         )
         active_matches[interaction.channel_id] = session
 
+        # Build title with team names if provided
+        title = f"🏆 Match Started! (BO{best_of})"
+        if t1 and t2:
+            title = f"🏆 {t1} vs {t2} — BO{best_of}"
+
+        desc_lines = [f"**Marshal:** {interaction.user.mention}"]
+        if t1 and t2:
+            desc_lines.append(f"**Teams:** {t1} vs {t2}")
+        desc_lines.append("")
+        desc_lines.append("Use `/game_started` to confirm the game has begun.")
+        desc_lines.append("Use `/game_result` to log each game's outcome.")
+        desc_lines.append('Team members can type **"I acknowledge"** to confirm results.')
+
         embed = discord.Embed(
-            title=f"🏆 Match Started! (BO{best_of})",
-            description=(
-                f"**Marshal:** {interaction.user.mention}\n\n"
-                "Use `/game_result` to log each game's outcome.\n"
-                "Team members can type **\"I acknowledge\"** to confirm results."
-            ),
+            title=title,
+            description="\n".join(desc_lines),
             color=0x00CC66,
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_footer(text="Good luck and have fun!")
         await interaction.followup.send(embed=embed)
+
+    # -- /game_started ---------------------------------------------------------
+
+    @app_commands.command(
+        name="game_started",
+        description="Signal that the game has begun. Cancels any active grace period.",
+    )
+    async def game_started(self, interaction: discord.Interaction):
+        if not await _is_marshal_or_admin(interaction):
+            await interaction.response.send_message(
+                "❌ You need the Marshal role or Admin to do this.", ephemeral=True
+            )
+            return
+
+        parts = []
+
+        # Cancel grace period if active
+        task_info = _grace_period_tasks.pop(interaction.channel_id, None)
+        if task_info:
+            task_info[0].cancel()
+            parts.append("⏹️ Grace period countdown **cancelled**.")
+
+        # Check for active match session
+        session = active_matches.get(interaction.channel_id)
+        if session:
+            if session.team1 and session.team2:
+                parts.append(f"🎮 **{session.team1} vs {session.team2}** — game has started!")
+            else:
+                parts.append("🎮 **Game has started!**")
+            parts.append("Use `/game_result` to log the outcome when the game ends.")
+        else:
+            if not task_info:
+                # No grace period and no match — still allow it
+                parts.append("🎮 **Game has started!**")
+                parts.append("💡 No match session is active. Use `/match_start` to track results.")
+
+        await interaction.response.send_message("\n".join(parts))
 
     # -- /game_result ----------------------------------------------------------
 
@@ -831,14 +953,15 @@ class Matches(commands.Cog):
         game = session.games[-1]
         user_name = f"{interaction.user.display_name} (Skipped)"
 
-        # Fill in any missing ack slots
-        if "Team A" not in game["acks"] and len(game["acks"]) < 1:
-            game["acks"]["Team A"] = {"user": user_name, "timestamp": now}
+        # Fill in any missing ack slots — use real team names if available
+        t1_label = session.get_team_label(1)
+        t2_label = session.get_team_label(2)
+        if t1_label not in game["acks"] and len(game["acks"]) < 1:
+            game["acks"][t1_label] = {"user": user_name, "timestamp": now}
         if len(game["acks"]) < 2:
-            # Use a second placeholder if only one ack exists
             existing = list(game["acks"].keys())
-            second_label = "Team B" if "Team B" not in existing else "Team B (auto)"
-            game["acks"][second_label] = {"user": user_name, "timestamp": now}
+            label = t2_label if t2_label not in existing else f"{t2_label} (auto)"
+            game["acks"][label] = {"user": user_name, "timestamp": now}
 
         # Sync to DB
         ack_list = list(game["acks"].items())
@@ -893,7 +1016,7 @@ class Matches(commands.Cog):
         if task:
             task.cancel()
 
-        embed = session.get_summary_embed()
+        embed = session.get_summary_embed(final=True)
         embed.color = 0xFF4444
         embed.title = "🛑 Match Force-Ended"
 
@@ -1036,9 +1159,11 @@ class Matches(commands.Cog):
             now = datetime.now(timezone.utc)
             user_name = "System (Auto-ack)"
 
-            # Fill missing ack slots
+            # Fill missing ack slots — use real team names if available
+            t1_label = s.get_team_label(1)
+            t2_label = s.get_team_label(2)
             if len(game["acks"]) < 2:
-                for placeholder in ["Team A", "Team B"]:
+                for placeholder in [t1_label, t2_label]:
                     if len(game["acks"]) >= 2:
                         break
                     if placeholder not in game["acks"]:
@@ -1077,6 +1202,86 @@ class Matches(commands.Cog):
 
         task = asyncio.create_task(_countdown())
         _ack_countdown_tasks[channel_id] = task
+
+    # -- /match_history --------------------------------------------------------
+
+    @app_commands.command(
+        name="match_history",
+        description="View recent match results.",
+    )
+    @app_commands.describe(limit="Number of matches to show (default 10, max 25)")
+    async def match_history(self, interaction: discord.Interaction, limit: int = 10):
+        if not await _is_marshal_or_admin(interaction):
+            await interaction.response.send_message(
+                "❌ You need the Marshal role or Admin to do this.", ephemeral=True
+            )
+            return
+
+        limit = max(1, min(limit, 25))
+        await interaction.response.defer(ephemeral=True)
+
+        rows = await Database.fetchall(
+            "SELECT * FROM match_sessions WHERE guild_id = %s AND status = 'ended' "
+            "ORDER BY ended_at DESC LIMIT %s",
+            (interaction.guild_id, limit),
+        )
+
+        if not rows:
+            await interaction.followup.send(
+                "📭 No completed matches found.", ephemeral=True
+            )
+            return
+
+        lines = []
+        for i, row in enumerate(rows, 1):
+            t1 = row.get("team1") or "Team A"
+            t2 = row.get("team2") or "Team B"
+            bo = row["best_of"]
+
+            # Load games for this session to compute score
+            game_rows = await Database.fetchall(
+                "SELECT result FROM match_games WHERE session_id = %s ORDER BY game_number",
+                (row["id"],),
+            )
+
+            t1_wins = 0
+            t2_wins = 0
+            for g in game_rows:
+                m = re.search(r'(\d+)\s*[-\u2013]\s*(\d+)', g["result"])
+                if m:
+                    s1, s2 = int(m.group(1)), int(m.group(2))
+                    if s1 > s2:
+                        t1_wins += 1
+                    elif s2 > s1:
+                        t2_wins += 1
+
+            # Format date
+            ended = row.get("ended_at")
+            date_str = discord.utils.format_dt(ended, style="d") if ended else "Unknown"
+
+            marshal = interaction.guild.get_member(row["marshal_id"])
+            marshal_name = marshal.display_name if marshal else f"ID {row['marshal_id']}"
+
+            winner_icon = ""
+            if t1_wins > t2_wins:
+                winner_icon = f" 🥇 {t1}"
+            elif t2_wins > t1_wins:
+                winner_icon = f" 🥇 {t2}"
+            else:
+                winner_icon = " 🤝 Tied"
+
+            lines.append(
+                f"**{i}.** {t1} vs {t2} (BO{bo}) — **{t1_wins}–{t2_wins}**{winner_icon}\n"
+                f"   📅 {date_str} · Marshal: {marshal_name}"
+            )
+
+        embed = discord.Embed(
+            title="📜 Match History",
+            description="\n\n".join(lines),
+            color=0xF2C21A,
+        )
+        embed.set_footer(text=f"Showing {len(rows)} most recent match(es)")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # -- Grace period command --------------------------------------------------
 
