@@ -1283,6 +1283,35 @@ class Matches(commands.Cog):
         embed.set_footer(text=f"Showing {len(rows)} most recent match(es)")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    # -- /coinflip -------------------------------------------------------------
+
+    @app_commands.command(
+        name="coinflip",
+        description="Flip a coin — Heads or Tails.",
+    )
+    async def coinflip(self, interaction: discord.Interaction):
+        if not await _is_marshal_or_admin(interaction):
+            await interaction.response.send_message(
+                "❌ You need the Marshal role or Admin to do this.", ephemeral=True
+            )
+            return
+
+        import random
+
+        result = random.choice(["Heads", "Tails"])
+
+        # Animated coin flip sequence
+        frames = ["🪙 Flipping...", "🔄 .", "🪙 ..", "🔄 ..."]
+        await interaction.response.send_message(frames[0])
+        msg = await interaction.original_response()
+
+        for frame in frames[1:]:
+            await asyncio.sleep(0.6)
+            await msg.edit(content=frame)
+
+        await asyncio.sleep(0.8)
+        await msg.edit(content=f"🪙 **{result}!**")
+
     # -- /remind ---------------------------------------------------------------
 
     @app_commands.command(
