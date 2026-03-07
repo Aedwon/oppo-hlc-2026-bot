@@ -1283,6 +1283,78 @@ class Matches(commands.Cog):
         embed.set_footer(text=f"Showing {len(rows)} most recent match(es)")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    # -- /remind ---------------------------------------------------------------
+
+    @app_commands.command(
+        name="set_remind_message",
+        description="Set the message that /remind will send (from a message link).",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(message_link="Discord message link to copy content from")
+    async def set_remind_message(self, interaction: discord.Interaction, message_link: str):
+        # Parse Discord message link: https://discord.com/channels/GUILD/CHANNEL/MESSAGE
+        import re as _re
+        match = _re.match(
+            r"https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)",
+            message_link.strip(),
+        )
+        if not match:
+            await interaction.response.send_message(
+                "❌ Invalid message link. Right-click a message → **Copy Message Link** and paste it here.",
+                ephemeral=True,
+            )
+            return
+
+        guild_id, channel_id, message_id = int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+        # Fetch the message
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                channel = await self.bot.fetch_channel(channel_id)
+            msg = await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await interaction.response.send_message(
+                "❌ Could not fetch that message. Make sure the bot has access to that channel.",
+                ephemeral=True,
+            )
+            return
+
+        if not msg.content:
+            await interaction.response.send_message(
+                "❌ That message has no text content (it may be embed-only).",
+                ephemeral=True,
+            )
+            return
+
+        await Database.set_config(interaction.guild_id, "remind_message", msg.content)
+        await interaction.response.send_message(
+            f"✅ Remind message saved.\n\n**Preview:**\n{msg.content}",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="remind",
+        description="Send the preset reminder message to this channel.",
+    )
+    async def remind(self, interaction: discord.Interaction):
+        if not await _is_marshal_or_admin(interaction):
+            await interaction.response.send_message(
+                "❌ You need the Marshal role or Admin to do this.", ephemeral=True
+            )
+            return
+
+        message = await Database.get_config(interaction.guild_id, "remind_message")
+        if not message:
+            await interaction.response.send_message(
+                "❌ No remind message configured. An admin must use `/set_remind_message` first.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.channel.send(message)
+        await interaction.response.send_message("✅ Reminder sent.", ephemeral=True)
+
     # -- Grace period command --------------------------------------------------
 
     @app_commands.command(
