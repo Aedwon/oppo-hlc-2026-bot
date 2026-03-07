@@ -76,8 +76,11 @@ class Voice(commands.Cog):
             "SELECT team_name FROM verified_users WHERE guild_id = %s AND discord_id = %s",
             (member.guild.id, member.id),
         )
-        if row and row.get("team_name") == team_name:
-            return True
+        if row:
+            db_team = row.get("team_name")
+            if db_team and team_name:
+                if db_team.strip().casefold() == team_name.strip().casefold():
+                    return True
 
         return False
 
